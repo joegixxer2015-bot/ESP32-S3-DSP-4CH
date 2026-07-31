@@ -1,6 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include "rom/gpio.h"        // Header สำหรับ GPIO Matrix
+#include "rom/gpio.h"
 #include "driver/gpio.h"
 #include "AudioTools.h"
 
@@ -13,8 +13,8 @@ const char* password = "YOUR_WIFI_PASSWORD";
 // ==========================================
 // PIN DEFINITIONS (ESP32-S3 N16R8)
 // ==========================================
-#define I2S_BCK_PIN   15   // Bit Clock (PCM5102A #1 & #2)
-#define I2S_LRCK_PIN  16   // Word Select / LCK (PCM5102A #1 & #2)
+#define I2S_BCK_PIN   15   // Bit Clock
+#define I2S_LRCK_PIN  16   // Word Select / LCK
 #define I2S_DATA1_PIN 17   // DIN 1 (PCM5102A #1)
 #define I2S_DATA2_PIN 18   // DIN 2 (PCM5102A #2)
 
@@ -31,14 +31,15 @@ void setupI2S() {
   i2s.begin(config);
 
   // สำเนาสัญญาณ I2S Data ออกไปยัง DIN 2 (GPIO 18) คู่ขนานผ่าน GPIO Matrix
-  esp_rom_gpio_connect_out_signal(I2S_DATA2_PIN, i2s_periph_signal[I2S_NUM_0].data_out_sig, false, false);
+  // ใช้ gpio_matrix_out สำหรับ Arduino ESP32 core v2.x
+  gpio_matrix_out(I2S_DATA2_PIN, i2s_periph_signal[I2S_NUM_0].data_out_sig, false, false);
 }
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
 
-  // 1. เริ่มระบบ I2S สำหรับ Dual PCM5102A
+  // 1. เริ่มระบบ I2S ออก PCM5102A ทั้ง 2 ตัว
   setupI2S();
 
   // 2. เชื่อมต่อ Wi-Fi
