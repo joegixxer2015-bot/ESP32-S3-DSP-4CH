@@ -1,39 +1,61 @@
 #include <Arduino.h>
+#include <WiFi.h>
+#include "rom/gpio.h"        // Header สำหรับ GPIO Matrix
+#include "driver/gpio.h"
 #include "AudioTools.h"
 
-// กำหนด Pin I2S
-#define I2S_BCK_PIN   15   // BCK พ่วงเข้า PCM5102A ทั้ง 2 ตัว
-#define I2S_LRCK_PIN  16   // LCK พ่วงเข้า PCM5102A ทั้ง 2 ตัว
-#define I2S_DATA1_PIN 17   // DIN1 (DAC ตัวที่ 1)
-#define I2S_DATA2_PIN 18   // DIN2 (DAC ตัวที่ 2)
+// ==========================================
+// WIFI SETTINGS
+// ==========================================
+const char* ssid     = "YOUR_WIFI_SSID";
+const char* password = "YOUR_WIFI_PASSWORD";
+
+// ==========================================
+// PIN DEFINITIONS (ESP32-S3 N16R8)
+// ==========================================
+#define I2S_BCK_PIN   15   // Bit Clock (PCM5102A #1 & #2)
+#define I2S_LRCK_PIN  16   // Word Select / LCK (PCM5102A #1 & #2)
+#define I2S_DATA1_PIN 17   // DIN 1 (PCM5102A #1)
+#define I2S_DATA2_PIN 18   // DIN 2 (PCM5102A #2)
 
 AudioInfo info(44100, 2, 16);
-SineWaveGenerator<int16_t> sineWave(32000); // ความดังสัญญาณ
-GeneratedSoundStream<int16_t> sound(sineWave);
 I2SStream i2s;
-StreamCopy copier(i2s, sound);
 
-void setup() {
-  Serial.begin(115200);
-  
-  // Configure I2S Config
+void setupI2S() {
   auto config = i2s.defaultConfig(TX_MODE);
   config.copyFrom(info);
   config.pin_bck = I2S_BCK_PIN;
   config.pin_ws  = I2S_LRCK_PIN;
-  config.pin_data = I2S_DATA1_PIN; // Primary DIN 1
+  config.pin_data = I2S_DATA1_PIN; // DIN 1
   
   i2s.begin(config);
 
-  // ต่อสัญญาณ DIN2 (GPIO 18) ให้ขับข้อมูลคู่ขนานกับ DIN1 (GPIO 17)
-  esp_rom_gpio_connect_out_signal(I2S_DATA2_PIN, i2s_periph_signal[I2S_NUM_0].data_out_sigs[0], false, false);
+  // สำเนาสัญญาณ I2S Data ออกไปยัง DIN 2 (GPIO 18) คู่ขนานผ่าน GPIO Matrix
+  esp_rom_gpio_connect_out_signal(I2S_DATA2_PIN, i2s_periph_signal[I2S_NUM_0].data_out_sig, false, false);
+}
 
-  // กำหนดความถี่เสียงทดสอบ 440Hz (เสียงตัว โน้ต A)
-  sineWave.begin(info, N_A4);
-  Serial.println(">> Audio Test Stream Started on GPIO 15, 16, 17, 18 <<");
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  // 1. เริ่มระบบ I2S สำหรับ Dual PCM5102A
+  setupI2S();
+
+  // 2. เชื่อมต่อ Wi-Fi
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi Connected!");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+
+  Serial.println(">> Audio System Initialized Successfully <<");
 }
 
 void loop() {
-  // ยิงสัญญาณ Sine Wave ไปยัง DAC ต่อเนื่อง
-  copier.copy();
+  delay(10);
 }
