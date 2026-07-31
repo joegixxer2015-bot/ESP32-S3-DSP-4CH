@@ -1,0 +1,4 @@
+{
+  "name": "ESP32-S3 DSP 4CH",
+  "builds": [{"chipFamily": "ESP32-S3","parts": [{"path": "../.pio/build/esp32-s3-devkitc-1/firmware.bin","offset": 65536},{"path": "../.pio/build/esp32-s3-devkitc-1/bootloader.bin","offset": 0},{"path": "../.pio/build/esp32-s3-devkitc-1/partitions.bin","offset": 32768}]}]
+}
