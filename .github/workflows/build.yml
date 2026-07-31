@@ -5,24 +5,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/pip
-            ~/.platformio/.cache
-          key: pio
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Install PlatformIO
-        run: pip install platformio
-      - name: Build Firmware
-        run: pio run
-      - name: Upload bin
-        uses: actions/upload-artifact@v4
-        with:
-          name: firmware
-          path: |
-           .pio/build/esp32-s3-devkitc-1/firmware.bin
-           .pio/build/esp32-s3-devkitc-1/bootloader.bin
-           .pio/build/esp32-s3-devkitc-1/partitions.bin
+      - uses: arduino/actions/setup-arduino-cli@v1
+      - name: Install core
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+      - name: Compile
+        run: |
+          arduino-cli compile --fqbn esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=default_16MB,PSRAM=enabled -e.
