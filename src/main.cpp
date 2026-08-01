@@ -51,8 +51,8 @@ void setupI2S() {
   volumeControl.setVolume(0.8); // เริ่มต้นที่ 80%
 }
 
-// Callback เมื่อได้รับข้อมูล ESP-NOW จาก ESP32-C3
-void OnDataRecv(const esp_now_recv_info *recv_info, const uint8_t *incomingDataPtr, int len) {
+// Callback เมื่อได้รับข้อมูล ESP-NOW จาก ESP32-C3 (รองรับ Arduino ESP32 core v2.x)
+void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingDataPtr, int len) {
   memcpy(&incomingData, incomingDataPtr, sizeof(incomingData));
   
   const char* modeNames[] = {"MASTER VOLUME", "BASS", "MID", "TREBLE"};
@@ -76,15 +76,12 @@ void OnDataRecv(const esp_now_recv_info *recv_info, const uint8_t *incomingDataP
     }
     case 1: // Bass Gain (-10 ถึง +10 dB)
       Serial.printf("--> Set Bass Gain: %d dB\n", incomingData.value);
-      // TODO: แมปค่าเข้า Filter EQ ฝั่ง AudioTools
       break;
     case 2: // Mid Gain (-10 ถึง +10 dB)
       Serial.printf("--> Set Mid Gain: %d dB\n", incomingData.value);
-      // TODO: แมปค่าเข้า Filter EQ ฝั่ง AudioTools
       break;
     case 3: // Treble Gain (-10 ถึง +10 dB)
       Serial.printf("--> Set Treble Gain: %d dB\n", incomingData.value);
-      // TODO: แมปค่าเข้า Filter EQ ฝั่ง AudioTools
       break;
   }
 }
