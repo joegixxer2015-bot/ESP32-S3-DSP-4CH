@@ -25,3 +25,9 @@ jobs:
 
       - name: Build Project
         run: pio run
+
+      - name: Upload Firmware Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-s3-dsp-firmware
+          path: .pio/build/**/firmware.bin
