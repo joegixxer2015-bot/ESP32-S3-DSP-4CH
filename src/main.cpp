@@ -44,12 +44,25 @@ void setupI2S() {
   volumeControl.setVolume(0.8); 
 }
 
-void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingDataPtr, int len) {
+// ==========================================================
+// 💡 Callback ESP-NOW รองรับทั้ง Arduino Core v2.x และ v3.x
+// ==========================================================
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+void OnDataRecv(const esp_now_recv_info_t * recv_info, const uint8_t *incomingDataPtr, int len) {
+#else
+void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingDataPtr, int len) {
+#endif
+  if (len < sizeof(incomingData)) return; // กัน Data ขยะล้น Buffer
+  
   memcpy(&incomingData, incomingDataPtr, sizeof(incomingData));
   
   const char* modeNames[] = {"MASTER VOLUME", "BASS", "MID", "TREBLE"};
+  
+  // ป้องกัน Index Out of Bounds
+  int safeMode = constrain(incomingData.controlMode, 0, 3);
+
   Serial.printf("\n[ESP-NOW] Mode: %s | Value: %d | Mute: %s\n", 
-                modeNames[incomingData.controlMode],
+                modeNames[safeMode],
                 incomingData.value, 
                 incomingData.isMuted ? "YES" : "NO");
 
@@ -58,7 +71,7 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingDataPtr, int len
     return;
   }
 
-  switch (incomingData.controlMode) {
+  switch (safeMode) {
     case 0: { 
       float volFactor = (float)incomingData.value / 100.0f;
       volumeControl.setVolume(volFactor);
@@ -84,7 +97,6 @@ void setup() {
 
   WiFi.mode(WIFI_STA);
   
-  // พิมพ์ MAC Address ของ S3 ออกทาง Serial Monitor เพื่อเอาไปใส่ใน C3
   Serial.print("ESP32-S3 STA MAC Address: ");
   Serial.println(WiFi.macAddress());
 
@@ -108,6 +120,7 @@ void setup() {
     Serial.println("Error initializing ESP-NOW");
     return;
   }
+  
   esp_now_register_recv_cb(OnDataRecv);
 
   Serial.println(">> Audio & DSP EQ Receiver Ready <<");
