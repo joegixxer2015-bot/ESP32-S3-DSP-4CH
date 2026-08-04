@@ -1,15 +1,10 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_now.h>
+#include <esp_wifi.h>
 #include "rom/gpio.h"
 #include "driver/gpio.h"
 #include "AudioTools.h"
-
-// ==========================================
-// WIFI SETTINGS
-// ==========================================
-const char* ssid     = "YOUR_WIFI_SSID";
-const char* password = "YOUR_WIFI_PASSWORD";
 
 #define I2S_BCK_PIN   15   
 #define I2S_LRCK_PIN  16   
@@ -44,21 +39,16 @@ void setupI2S() {
   volumeControl.setVolume(0.8); 
 }
 
-// ==========================================================
-// 💡 Callback ESP-NOW รองรับทั้ง Arduino Core v2.x และ v3.x
-// ==========================================================
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
 void OnDataRecv(const esp_now_recv_info_t * recv_info, const uint8_t *incomingDataPtr, int len) {
 #else
 void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingDataPtr, int len) {
 #endif
-  if (len < sizeof(incomingData)) return; // กัน Data ขยะล้น Buffer
+  if (len < sizeof(incomingData)) return;
   
   memcpy(&incomingData, incomingDataPtr, sizeof(incomingData));
   
   const char* modeNames[] = {"MASTER VOLUME", "BASS", "MID", "TREBLE"};
-  
-  // ป้องกัน Index Out of Bounds
   int safeMode = constrain(incomingData.controlMode, 0, 3);
 
   Serial.printf("\n[ESP-NOW] Mode: %s | Value: %d | Mute: %s\n", 
@@ -95,27 +85,15 @@ void setup() {
 
   setupI2S();
 
+  // กำหนดโหมด Wi-Fi เป็น STA และตั้งค่า Channel 1 โดยตรง
   WiFi.mode(WIFI_STA);
-  
+  WiFi.disconnect();
+  esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+
   Serial.print("ESP32-S3 STA MAC Address: ");
   Serial.println(WiFi.macAddress());
 
-  WiFi.begin(ssid, password);
-  Serial.print("Connecting to WiFi");
-  int timeout = 0;
-  while (WiFi.status() != WL_CONNECTED && timeout < 20) {
-    delay(500);
-    Serial.print(".");
-    timeout++;
-  }
-  
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nWiFi Connected!");
-    Serial.printf("Connected Channel: %d\n", WiFi.channel());
-  } else {
-    Serial.println("\nWiFi Connect Failed! Operating in standalone ESP-NOW mode.");
-  }
-
+  // เริ่มต้นใช้งาน ESP-NOW แบบ Standalone
   if (esp_now_init() != ESP_OK) {
     Serial.println("Error initializing ESP-NOW");
     return;
@@ -123,9 +101,9 @@ void setup() {
   
   esp_now_register_recv_cb(OnDataRecv);
 
-  Serial.println(">> Audio & DSP EQ Receiver Ready <<");
+  Serial.println(">> Audio & DSP EQ Receiver Ready (Standalone ESP-NOW) <<");
 }
 
 void loop() {
-  delay(10);
+  vTaskDelay(10 / portTICK_PERIOD_MS); // ใช้ vTaskDelay ป้องกัน Watchdog ตัด
 }
