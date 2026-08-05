@@ -23,21 +23,7 @@ AudioInfo info(44100, 2, 16);
 I2SStream i2s;
 VolumeStream volumeControl(i2s); 
 
-void setupI2S() {
-  auto config = i2s.defaultConfig(TX_MODE);
-  config.copyFrom(info);
-  config.pin_bck = I2S_BCK_PIN;
-  config.pin_ws  = I2S_LRCK_PIN;
-  config.pin_data = I2S_DATA1_PIN; 
-  
-  i2s.begin(config);
-  gpio_matrix_out(I2S_DATA2_PIN, i2s_periph_signal[I2S_NUM_0].data_out_sig, false, false);
-
-  auto vconfig = volumeControl.defaultConfig();
-  vconfig.copyFrom(info);
-  volumeControl.begin(vconfig);
-  volumeControl.setVolume(0.8); 
-}
+unsigned long lastKeepAliveCheck = 0;
 
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
 void OnDataRecv(const esp_now_recv_info_t * recv_info, const uint8_t *incomingDataPtr, int len) {
@@ -79,31 +65,63 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingDataPtr, int le
   }
 }
 
+void initWifiAndEspNow() {
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  
+  // ล็อก Channel 1 บอร์ด S3
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+  esp_wifi_set_promiscuous(false);
+
+  if (esp_now_init() == ESP_OK) {
+    esp_now_register_recv_cb(OnDataRecv);
+    Serial.println(">> ESP-NOW Initialized & Ready on Channel 1 <<");
+  } else {
+    Serial.println("ESP-NOW Init Failed!");
+  }
+}
+
+void setupI2S() {
+  auto config = i2s.defaultConfig(TX_MODE);
+  config.copyFrom(info);
+  config.pin_bck = I2S_BCK_PIN;
+  config.pin_ws  = I2S_LRCK_PIN;
+  config.pin_data = I2S_DATA1_PIN; 
+  
+  i2s.begin(config);
+  gpio_matrix_out(I2S_DATA2_PIN, i2s_periph_signal[I2S_NUM_0].data_out_sig, false, false);
+
+  auto vconfig = volumeControl.defaultConfig();
+  vconfig.copyFrom(info);
+  volumeControl.begin(vconfig);
+  volumeControl.setVolume(0.8); 
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
 
   setupI2S();
-
-  // กำหนดโหมด Wi-Fi เป็น STA และตั้งค่า Channel 1 โดยตรง
-  WiFi.mode(WIFI_STA);
-  WiFi.disconnect();
-  esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+  initWifiAndEspNow();
 
   Serial.print("ESP32-S3 STA MAC Address: ");
   Serial.println(WiFi.macAddress());
-
-  // เริ่มต้นใช้งาน ESP-NOW แบบ Standalone
-  if (esp_now_init() != ESP_OK) {
-    Serial.println("Error initializing ESP-NOW");
-    return;
-  }
-  
-  esp_now_register_recv_cb(OnDataRecv);
-
-  Serial.println(">> Audio & DSP EQ Receiver Ready (Standalone ESP-NOW) <<");
 }
 
 void loop() {
-  vTaskDelay(10 / portTICK_PERIOD_MS); // ใช้ vTaskDelay ป้องกัน Watchdog ตัด
+  // สแตนบายด์ตรึง Channel 1 ไว้ตลอดเวลา
+  if (millis() - lastKeepAliveCheck > 3000) {
+    uint8_t primaryChan;
+    wifi_second_chan_t secondChan;
+    esp_wifi_get_channel(&primaryChan, &secondChan);
+
+    if (primaryChan != 1) {
+      esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+    }
+    lastKeepAliveCheck = millis();
+  }
+
+  vTaskDelay(10 / portTICK_PERIOD_MS);
 }
