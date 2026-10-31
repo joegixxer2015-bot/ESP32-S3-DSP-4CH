@@ -6,10 +6,16 @@
 #include "driver/gpio.h"
 #include "AudioTools.h"
 
+// --- พินฝั่งขาออก (Output ไปยัง DAC) ---
 #define I2S_BCK_PIN   15   
 #define I2S_LRCK_PIN  16   
 #define I2S_DATA1_PIN 17   
 #define I2S_DATA2_PIN 18   
+
+// --- เพิ่มเติม: พินฝั่งขาเข้า (Input รับจาก ESP32 DevKit V1) ---
+#define I2S_IN_BCK    4
+#define I2S_IN_LRCK   5
+#define I2S_IN_DATA   6
 
 typedef struct struct_message {
     int controlMode;  
@@ -20,8 +26,11 @@ typedef struct struct_message {
 struct_message incomingData;
 
 AudioInfo info(44100, 2, 16);
-I2SStream i2s;
-VolumeStream volumeControl(i2s); 
+
+// ประกาศสตรีมทั้งฝั่งรับ (RX) และฝั่งส่ง (TX)
+I2SStream i2sStreamIn;   // รับสัญญาณเสียงจาก DevKit V1
+I2SStream i2sStreamOut;  // ส่งสัญญาณเสียงออกไป DAC
+VolumeStream volumeControl(i2sStreamOut); 
 
 unsigned long lastKeepAliveCheck = 0;
 
@@ -84,15 +93,25 @@ void initWifiAndEspNow() {
 }
 
 void setupI2S() {
-  auto config = i2s.defaultConfig(TX_MODE);
-  config.copyFrom(info);
-  config.pin_bck = I2S_BCK_PIN;
-  config.pin_ws  = I2S_LRCK_PIN;
-  config.pin_data = I2S_DATA1_PIN; 
+  // 1. ตั้งค่าฝั่งรับเข้า (Input - Slave RX) จาก DevKit V1
+  auto configIn = i2sStreamIn.defaultConfig(RX_MODE);
+  configIn.copyFrom(info);
+  configIn.pin_bck = I2S_IN_BCK;
+  configIn.pin_ws  = I2S_IN_LRCK;
+  configIn.pin_data = I2S_IN_DATA;
+  i2sStreamIn.begin(configIn);
+
+  // 2. ตั้งค่าฝั่งส่งออก (Output - Master TX) ไปยัง DAC
+  auto configOut = i2sStreamOut.defaultConfig(TX_MODE);
+  configOut.copyFrom(info);
+  configOut.pin_bck = I2S_BCK_PIN;
+  configOut.pin_ws  = I2S_LRCK_PIN;
+  configOut.pin_data = I2S_DATA1_PIN; 
   
-  i2s.begin(config);
+  i2sStreamOut.begin(configOut);
   gpio_matrix_out(I2S_DATA2_PIN, i2s_periph_signal[I2S_NUM_0].data_out_sig, false, false);
 
+  // 3. ตั้งค่าระบบ Volume และ DSP Pipeline
   auto vconfig = volumeControl.defaultConfig();
   vconfig.copyFrom(info);
   volumeControl.begin(vconfig);
@@ -111,7 +130,14 @@ void setup() {
 }
 
 void loop() {
-  // สแตนบายด์ตรึง Channel 1 ไว้ตลอดเวลา
+  // อ่านข้อมูลเสียงจากฝั่งรับ (DevKit V1) แล้วส่งผ่านระบบ Volume/DSP ไปออกฝั่ง DAC ทันที
+  uint8_t buffer[512];
+  size_t bytesRead = i2sStreamIn.readBytes(buffer, sizeof(buffer));
+  if (bytesRead > 0) {
+    volumeControl.write(buffer, bytesRead);
+  }
+
+  // สแตนบายด์ตรึง Channel 1 ไว้สำหรับ ESP-NOW
   if (millis() - lastKeepAliveCheck > 3000) {
     uint8_t primaryChan;
     wifi_second_chan_t secondChan;
@@ -122,6 +148,4 @@ void loop() {
     }
     lastKeepAliveCheck = millis();
   }
-
-  vTaskDelay(10 / portTICK_PERIOD_MS);
 }
