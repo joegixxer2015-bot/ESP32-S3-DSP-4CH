@@ -5,7 +5,6 @@
 #include "rom/gpio.h"
 #include "driver/gpio.h"
 #include "AudioTools.h"
-#include <AudioTools/AudioLibs/AudioDSP.h> // เพิ่มไลบรารีสำหรับ DSP / Filter
 
 // --- พินฝั่งขาออก (Output ไปยัง DAC) ---
 #define I2S_BCK_PIN   15   
