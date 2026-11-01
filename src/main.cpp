@@ -32,8 +32,6 @@ I2SStream i2sStreamIn;
 I2SStream i2sStreamOut;  
 VolumeStream volumeControl(i2sStreamOut); 
 
-// ใช้ VolumeLimiter หรือปรับแต่ง Gain ผ่าน Volume/Filter สำเร็จรูปของ AudioTools
-// เพื่อความเสถียรและไม่ติด Error เรื่อง Scope ของคลาส Biquad Filter ดิบ
 VolumeStream eqBassStream(volumeControl);
 VolumeStream eqMidStream(eqBassStream);
 VolumeStream eqTrebleStream(eqMidStream);
@@ -62,7 +60,6 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingDataPtr, int le
     return;
   }
 
-  // อัปเดตค่าตามโหมดที่ส่งมาจากรีโมต C3
   switch (safeMode) {
     case 0: { 
       float volFactor = (float)incomingData.value / 100.0f;
@@ -86,7 +83,6 @@ void initWifiAndEspNow() {
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
   
-  // ล็อก Channel 1 บอร์ด S3
   esp_wifi_set_promiscuous(true);
   esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
   esp_wifi_set_promiscuous(false);
@@ -108,13 +104,14 @@ void setupI2S() {
   configIn.pin_data = I2S_IN_DATA;
   i2sStreamIn.begin(configIn);
 
-  // 2. ตั้งค่าฝั่งส่งออก (Output - Master TX) ไปยัง DAC
+  // 2. ตั้งค่าฝั่งส่งออก (Output - Master TX) ไปยัง DAC พร้อมเปิดใช้งาน TX Mode อย่างถูกต้อง
   auto configOut = i2sStreamOut.defaultConfig(TX_MODE);
   configOut.copyFrom(info);
   configOut.pin_bck = I2S_BCK_PIN;
   configOut.pin_ws  = I2S_LRCK_PIN;
   configOut.pin_data = I2S_DATA1_PIN; 
   
+  // จุดสำคัญที่แก้ไข: สั่งเปิดใช้งาน i2sStreamOut ด้วย configOut เพื่อป้องกัน Error TX mode not enabled
   i2sStreamOut.begin(configOut);
   gpio_matrix_out(I2S_DATA2_PIN, i2s_periph_signal[I2S_NUM_0].data_out_sig, false, false);
 
@@ -138,7 +135,7 @@ void setup() {
 }
 
 void loop() {
-  // อ่านข้อมูลเสียงจากฝั่งรับ (DevKit V1) แล้วส่งผ่านระบบ Volume ออก DAC ทันที
+  // อ่านข้อมูลเสียงจากฝั่งรับ (DevKit V1) แล้วส่งผ่านระบบ Volume ออก DAC
   uint8_t buffer[512];
   size_t bytesRead = i2sStreamIn.readBytes(buffer, sizeof(buffer));
   
@@ -146,7 +143,6 @@ void loop() {
     volumeControl.write(buffer, bytesRead);
   }
 
-  // สแตนบายด์ตรึง Channel 1 ไว้สำหรับ ESP-NOW
   if (millis() - lastKeepAliveCheck > 3000) {
     uint8_t primaryChan;
     wifi_second_chan_t secondChan;
