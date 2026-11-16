@@ -6,17 +6,18 @@
 #include "driver/gpio.h"
 #include "AudioTools.h"
 
-// --- พินฝั่งขาออก (Output ไปยัง DAC) ---
+// --- พินฝั่งขาออก (Output ไปยัง DAC PCM5102A) ---
 #define I2S_BCK_PIN   15   
 #define I2S_LRCK_PIN  16   
 #define I2S_DATA1_PIN 17   
-#define I2S_DATA2_PIN 18   
+#define I2S_DATA2_PIN 18   // ขาพ่วงข้อมูลเสริม (ถ้ามี)
 
 // --- พินฝั่งขาเข้า (Input รับจาก ESP32 DevKit V1) ---
 #define I2S_IN_BCK    4
 #define I2S_IN_LRCK   5
 #define I2S_IN_DATA   6
 
+// โครงสร้างข้อมูลคำสั่งจากรีโมท (ESP-NOW)
 typedef struct struct_message {
     int controlMode;  
     int value;        
@@ -25,19 +26,28 @@ typedef struct struct_message {
 
 struct_message incomingData;
 
+// ตั้งค่ารูปแบบเสียง: 44.1kHz, Stereo, 16-bit
 AudioInfo info(44100, 2, 16);
 
-// ประกาศสตรีมทั้งฝั่งรับ (RX) และฝั่งส่ง (TX)
+// --- ระบบสตรีมมิ่งและสายพานประมวลผลเสียง ---
 I2SStream i2sStreamIn;   
 I2SStream i2sStreamOut;  
-VolumeStream volumeControl(i2sStreamOut); 
 
+// เรียงลำดับท่อส่งข้อมูล (จากปลายทางออก DAC ย้อนขึ้นไปหาต้นทาง)
+VolumeStream volumeControl(i2sStreamOut); 
 VolumeStream eqBassStream(volumeControl);
 VolumeStream eqMidStream(eqBassStream);
 VolumeStream eqTrebleStream(eqMidStream);
 
+// **ตัวแก้ปัญหา Clock Drift:** สร้าง Ring Buffer ขนาด 4KB คั่นกลางฝั่งรับ
+BufferedStream bufferedIn(i2sStreamIn, 4096); 
+
+// **ตัวเชื่อมสายพาน:** ดึงข้อมูลจาก Buffer ผ่านท่อ EQ และ Volume วิ่งออก DAC อัตโนมัติ
+StreamCopy copier(eqTrebleStream, bufferedIn);
+
 unsigned long lastKeepAliveCheck = 0;
 
+// --- ฟังก์ชันรับข้อมูล ESP-NOW ---
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
 void OnDataRecv(const esp_now_recv_info_t * recv_info, const uint8_t *incomingDataPtr, int len) {
 #else
@@ -61,13 +71,14 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingDataPtr, int le
   }
 
   switch (safeMode) {
-    case 0: { 
+    case 0: { // Master Volume (0-100 แปลงเป็น 0.0 - 1.0)
       float volFactor = (float)incomingData.value / 100.0f;
       volumeControl.setVolume(volFactor);
       break;
     }
     case 1: 
       Serial.printf("--> Set Bass Gain: %d dB\n", incomingData.value);
+      // ตรงนี้สามารถผูกกับฟังก์ชันปรับ Gain ของ EQ เพิ่มเติมได้ในอนาคต
       break;
     case 2: 
       Serial.printf("--> Set Mid Gain: %d dB\n", incomingData.value);
@@ -78,6 +89,7 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingDataPtr, int le
   }
 }
 
+// --- ตั้งค่าระบบ Wi-Fi และ ESP-NOW ล็อกช่อง 1 ---
 void initWifiAndEspNow() {
   WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
@@ -95,6 +107,7 @@ void initWifiAndEspNow() {
   }
 }
 
+// --- ตั้งค่าพอร์ต I2S ทั้งขาเข้าและขาออก ---
 void setupI2S() {
   // 1. ตั้งค่าฝั่งรับเข้า (Input - Slave RX) จาก DevKit V1
   auto configIn = i2sStreamIn.defaultConfig(RX_MODE);
@@ -104,45 +117,50 @@ void setupI2S() {
   configIn.pin_data = I2S_IN_DATA;
   i2sStreamIn.begin(configIn);
 
-  // 2. ตั้งค่าฝั่งส่งออก (Output - Master TX) ไปยัง DAC พร้อมเปิดใช้งาน TX Mode อย่างถูกต้อง
+  // 2. ตั้งค่าฝั่งส่งออก (Output - Master TX) ไปยัง DAC PCM5102A
   auto configOut = i2sStreamOut.defaultConfig(TX_MODE);
   configOut.copyFrom(info);
   configOut.pin_bck = I2S_BCK_PIN;
   configOut.pin_ws  = I2S_LRCK_PIN;
   configOut.pin_data = I2S_DATA1_PIN; 
-  
-  // จุดสำคัญที่แก้ไข: สั่งเปิดใช้งาน i2sStreamOut ด้วย configOut เพื่อป้องกัน Error TX mode not enabled
   i2sStreamOut.begin(configOut);
+  
+  // พ่วงสัญญาณขาออกชุดที่ 2 (ถ้าต้องการส่งออก 2 ทาง)
   gpio_matrix_out(I2S_DATA2_PIN, i2s_periph_signal[I2S_NUM_0].data_out_sig, false, false);
 
-  // 3. ตั้งค่าระบบ Volume
+  // 3. เริ่มต้นระบบ Volume และสายพานตัวกรองทั้งหมด
   auto vconfig = volumeControl.defaultConfig();
   vconfig.copyFrom(info);
+  
   volumeControl.begin(vconfig);
-  volumeControl.setVolume(0.8); 
+  volumeControl.setVolume(0.8); // ตั้งค่าความดังเริ่มต้นที่ 80%
+
+  eqBassStream.begin(vconfig);
+  eqMidStream.begin(vconfig);
+  eqTrebleStream.begin(vconfig);
+
+  // เริ่มต้นทำงาน Ring Buffer คั่นกลาง
+  bufferedIn.begin();
 }
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
 
+  // เริ่มต้นระบบฮาร์ดแวร์
   setupI2S();
   initWifiAndEspNow();
 
   Serial.print("ESP32-S3 STA MAC Address: ");
   Serial.println(WiFi.macAddress());
-  Serial.println(">> ESP32-S3 Audio System Ready! <<");
+  Serial.println(">> ESP32-S3 Audio DSP System Ready! <<");
 }
 
 void loop() {
-  // อ่านข้อมูลเสียงจากฝั่งรับ (DevKit V1) แล้วส่งผ่านระบบ Volume ออก DAC
-  uint8_t buffer[512];
-  size_t bytesRead = i2sStreamIn.readBytes(buffer, sizeof(buffer));
-  
-  if (bytesRead > 0) {
-    volumeControl.write(buffer, bytesRead);
-  }
+  // ประมวลผลเสียงอัตโนมัติ: ดึงจาก Buffer -> ผ่าน EQ/Volume -> พ่นออก DAC
+  copier.copy();
 
+  // ตรวจสอบและรักษากลุ่มช่องสัญญาณ Wi-Fi ให้คงอยู่ที่ช่อง 1 เสมอทุกๆ 3 วินาที
   if (millis() - lastKeepAliveCheck > 3000) {
     uint8_t primaryChan;
     wifi_second_chan_t secondChan;
