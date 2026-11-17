@@ -40,7 +40,7 @@ VolumeStream eqMidStream(eqBassStream);
 VolumeStream eqTrebleStream(eqMidStream);
 
 // **ตัวแก้ปัญหา Clock Drift:** สร้าง Ring Buffer ขนาด 4KB คั่นกลางฝั่งรับ
-BufferedStream bufferedIn(i2sStreamIn, 4096); 
+BufferedStream bufferedIn(i2sStreamIn, 32768); 
 
 // **ตัวเชื่อมสายพาน:** ดึงข้อมูลจาก Buffer ผ่านท่อ EQ และ Volume วิ่งออก DAC อัตโนมัติ
 StreamCopy copier(eqTrebleStream, bufferedIn);
