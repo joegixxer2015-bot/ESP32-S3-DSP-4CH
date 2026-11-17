@@ -26,7 +26,7 @@ typedef struct struct_message {
 
 struct_message incomingData;
 
-// ตั้งค่ารูปแบบเสียง: 44.1kHz, Stereo, 16-bit
+// ตั้งค่ารูปแบบเสียงพื้นฐาน: 44.1kHz, Stereo, 16-bit
 AudioInfo info(44100, 2, 16);
 
 // --- ระบบสตรีมมิ่งและสายพานประมวลผลเสียง ---
@@ -39,7 +39,7 @@ VolumeStream eqBassStream(volumeControl);
 VolumeStream eqMidStream(eqBassStream);
 VolumeStream eqTrebleStream(eqMidStream);
 
-// **ตัวแก้ปัญหา Clock Drift:** สร้าง Ring Buffer ขนาด 32KB คั่นกลางฝั่งรับ
+// **ตัวแก้ปัญหา Clock Drift:** สร้าง Ring Buffer ขนาด 32KB คั่นกลางฝั่งรับ (รันบน PSRAM)
 BufferedStream bufferedIn(i2sStreamIn, 32768); 
 
 // **ตัวเชื่อมสายพาน:** ดึงข้อมูลจาก Buffer ผ่านท่อ EQ และ Volume วิ่งออก DAC อัตโนมัติ
@@ -108,9 +108,12 @@ void initWifiAndEspNow() {
 
 // --- ตั้งค่าพอร์ต I2S ทั้งขาเข้าและขาออก ---
 void setupI2S() {
-  // 1. ตั้งค่าฝั่งรับเข้า (Input - Slave RX) จาก DevKit V1
+  // 1. ตั้งค่าฝั่งรับเข้า (Input - Slave RX) จาก DevKit V1 แบบระบุค่าชัดเจน
   auto configIn = i2sStreamIn.defaultConfig(RX_MODE);
-  configIn.copyFrom(info);
+  configIn.sample_rate = 44100;
+  configIn.channels = 2;
+  configIn.bits_per_sample = 16;
+  
   configIn.pin_bck = I2S_IN_BCK;
   configIn.pin_ws  = I2S_IN_LRCK;
   configIn.pin_data = I2S_IN_DATA;
@@ -122,13 +125,16 @@ void setupI2S() {
 
   // 2. ตั้งค่าฝั่งส่งออก (Output - Master TX) ไปยัง DAC PCM5102A
   auto configOut = i2sStreamOut.defaultConfig(TX_MODE);
-  configOut.copyFrom(info);
+  configOut.sample_rate = 44100;
+  configOut.channels = 2;
+  configOut.bits_per_sample = 16;
+  
   configOut.pin_bck = I2S_BCK_PIN;
   configOut.pin_ws  = I2S_LRCK_PIN;
   configOut.pin_data = I2S_DATA1_PIN; 
   i2sStreamOut.begin(configOut);
   
-  // พ่วงสัญญาณขาออกชุดที่ 2 (ถ้าต้องการส่งออก 2 ทาง)
+  // พ่วงสัญญาณขาออกชุดที่ 2
   gpio_matrix_out(I2S_DATA2_PIN, i2s_periph_signal[I2S_NUM_0].data_out_sig, false, false);
 
   // 3. เริ่มต้นระบบ Volume และสายพานตัวกรองทั้งหมด
