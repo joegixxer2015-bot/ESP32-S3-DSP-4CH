@@ -39,7 +39,7 @@ VolumeStream eqBassStream(volumeControl);
 VolumeStream eqMidStream(eqBassStream);
 VolumeStream eqTrebleStream(eqMidStream);
 
-// **ตัวแก้ปัญหา Clock Drift:** สร้าง Ring Buffer ขนาด 4KB คั่นกลางฝั่งรับ
+// **ตัวแก้ปัญหา Clock Drift:** สร้าง Ring Buffer ขนาด 32KB คั่นกลางฝั่งรับ
 BufferedStream bufferedIn(i2sStreamIn, 32768); 
 
 // **ตัวเชื่อมสายพาน:** ดึงข้อมูลจาก Buffer ผ่านท่อ EQ และ Volume วิ่งออก DAC อัตโนมัติ
@@ -78,7 +78,6 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingDataPtr, int le
     }
     case 1: 
       Serial.printf("--> Set Bass Gain: %d dB\n", incomingData.value);
-      // ตรงนี้สามารถผูกกับฟังก์ชันปรับ Gain ของ EQ เพิ่มเติมได้ในอนาคต
       break;
     case 2: 
       Serial.printf("--> Set Mid Gain: %d dB\n", incomingData.value);
@@ -115,6 +114,10 @@ void setupI2S() {
   configIn.pin_bck = I2S_IN_BCK;
   configIn.pin_ws  = I2S_IN_LRCK;
   configIn.pin_data = I2S_IN_DATA;
+  
+  // บังคับให้ S3 ฝั่งรับทำหน้าที่เป็น Slave รอรับ Clock จาก DevKit V1
+  configIn.is_master = false; 
+
   i2sStreamIn.begin(configIn);
 
   // 2. ตั้งค่าฝั่งส่งออก (Output - Master TX) ไปยัง DAC PCM5102A
@@ -139,7 +142,7 @@ void setupI2S() {
   eqMidStream.begin(vconfig);
   eqTrebleStream.begin(vconfig);
 
-  // เริ่มต้นทำงาน Ring Buffer คั่นกลาง
+  // เริ่มต้นทำงาน Ring Buffer คั่นกลาง (32KB บน PSRAM)
   bufferedIn.begin();
 }
 
