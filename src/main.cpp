@@ -29,21 +29,18 @@ struct_message incomingData;
 // ตั้งค่ารูปแบบเสียงพื้นฐาน: 44.1kHz, Stereo, 16-bit
 AudioInfo info(44100, 2, 16);
 
-// --- ระบบสตรีมมิ่งและสายพานประมวลผลเสียง ---
+// --- ระบบสตรีมมิ่งเส้นทางตรง (ตัดท่อ EQ ออกแล้ว) ---
 I2SStream i2sStreamIn;   
 I2SStream i2sStreamOut;  
 
-// เรียงลำดับท่อส่งข้อมูล (จากปลายทางออก DAC ย้อนขึ้นไปหาต้นทาง)
-VolumeStream volumeControl(i2sStreamOut); 
-VolumeStream eqBassStream(volumeControl);
-VolumeStream eqMidStream(eqBassStream);
-VolumeStream eqTrebleStream(eqMidStream);
-
-// **ตัวแก้ปัญหา Clock Drift:** สร้าง Ring Buffer ขนาด 32KB คั่นกลางฝั่งรับ (รันบน PSRAM)
+// ถังพักข้อมูลฝั่งรับ (32KB บน PSRAM)
 BufferedStream bufferedIn(i2sStreamIn, 32768); 
 
-// **ตัวเชื่อมสายพาน:** ดึงข้อมูลจาก Buffer ผ่านท่อ EQ และ Volume วิ่งออก DAC อัตโนมัติ
-StreamCopy copier(eqTrebleStream, bufferedIn);
+// ตัวปรับระดับความดังปลายทางก่อนออก DAC
+VolumeStream volumeControl(i2sStreamOut); 
+
+// ตัวเชื่อมสายพาน: ดึงจาก Buffer เข้า VolumeStream แล้วออก DAC โดยตรง
+StreamCopy copier(volumeControl, bufferedIn);
 
 unsigned long lastKeepAliveCheck = 0;
 
@@ -77,13 +74,13 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingDataPtr, int le
       break;
     }
     case 1: 
-      Serial.printf("--> Set Bass Gain: %d dB\n", incomingData.value);
+      Serial.printf("--> Set Bass Gain: %d dB (EQ bypassed for test)\n", incomingData.value);
       break;
     case 2: 
-      Serial.printf("--> Set Mid Gain: %d dB\n", incomingData.value);
+      Serial.printf("--> Set Mid Gain: %d dB (EQ bypassed for test)\n", incomingData.value);
       break;
     case 3: 
-      Serial.printf("--> Set Treble Gain: %d dB\n", incomingData.value);
+      Serial.printf("--> Set Treble Gain: %d dB (EQ bypassed for test)\n", incomingData.value);
       break;
   }
 }
@@ -108,27 +105,25 @@ void initWifiAndEspNow() {
 
 // --- ตั้งค่าพอร์ต I2S ทั้งขาเข้าและขาออก ---
 void setupI2S() {
-  // 1. ตั้งค่าฝั่งรับเข้า (Input - Slave RX) จาก DevKit V1 แบบระบุค่าชัดเจน
+  // 1. ตั้งค่าฝั่งรับเข้า (Input - Slave RX) จาก DevKit V1
   auto configIn = i2sStreamIn.defaultConfig(RX_MODE);
   configIn.sample_rate = 44100;
   configIn.channels = 2;
   configIn.bits_per_sample = 16;
-  
   configIn.pin_bck = I2S_IN_BCK;
   configIn.pin_ws  = I2S_IN_LRCK;
   configIn.pin_data = I2S_IN_DATA;
-  
-  // บังคับให้ S3 ฝั่งรับทำหน้าที่เป็น Slave รอรับ Clock จาก DevKit V1
   configIn.is_master = false; 
-
   i2sStreamIn.begin(configIn);
+
+  // เริ่มต้น Buffer บน PSRAM
+  bufferedIn.begin(info);
 
   // 2. ตั้งค่าฝั่งส่งออก (Output - Master TX) ไปยัง DAC PCM5102A
   auto configOut = i2sStreamOut.defaultConfig(TX_MODE);
   configOut.sample_rate = 44100;
   configOut.channels = 2;
   configOut.bits_per_sample = 16;
-  
   configOut.pin_bck = I2S_BCK_PIN;
   configOut.pin_ws  = I2S_LRCK_PIN;
   configOut.pin_data = I2S_DATA1_PIN; 
@@ -137,39 +132,31 @@ void setupI2S() {
   // พ่วงสัญญาณขาออกชุดที่ 2
   gpio_matrix_out(I2S_DATA2_PIN, i2s_periph_signal[I2S_NUM_0].data_out_sig, false, false);
 
-  // 3. เริ่มต้นระบบ Volume และสายพานตัวกรองทั้งหมด
+  // 3. เริ่มต้นระบบ Volume ที่ความดังเริ่มต้น 80%
   auto vconfig = volumeControl.defaultConfig();
   vconfig.copyFrom(info);
-  
   volumeControl.begin(vconfig);
-  volumeControl.setVolume(0.8); // ตั้งค่าความดังเริ่มต้นที่ 80%
+  volumeControl.setVolume(0.8);
 
-  eqBassStream.begin(vconfig);
-  eqMidStream.begin(vconfig);
-  eqTrebleStream.begin(vconfig);
-
-  // เริ่มต้นทำงาน Ring Buffer คั่นกลาง (32KB บน PSRAM)
-  bufferedIn.begin();
+  // 4. เริ่มต้นตัวคัดลอกข้อมูลสตรีม
+  copier.begin();
 }
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
 
-  // เริ่มต้นระบบฮาร์ดแวร์
   setupI2S();
   initWifiAndEspNow();
 
   Serial.print("ESP32-S3 STA MAC Address: ");
   Serial.println(WiFi.macAddress());
-  Serial.println(">> ESP32-S3 Audio DSP System Ready! <<");
+  Serial.println(">> ESP32-S3 Direct Test Ready (No EQ)! <<");
 }
 
 void loop() {
-  // ประมวลผลเสียงอัตโนมัติ: ดึงจาก Buffer -> ผ่าน EQ/Volume -> พ่นออก DAC
   copier.copy();
 
-  // ตรวจสอบและรักษากลุ่มช่องสัญญาณ Wi-Fi ให้คงอยู่ที่ช่อง 1 เสมอทุกๆ 3 วินาที
   if (millis() - lastKeepAliveCheck > 3000) {
     uint8_t primaryChan;
     wifi_second_chan_t secondChan;
