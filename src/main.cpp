@@ -117,7 +117,7 @@ void setupI2S() {
   i2sStreamIn.begin(configIn);
 
   // เริ่มต้น Buffer บน PSRAM
-  bufferedIn.begin(info);
+  bufferedIn.begin();
 
   // 2. ตั้งค่าฝั่งส่งออก (Output - Master TX) ไปยัง DAC PCM5102A
   auto configOut = i2sStreamOut.defaultConfig(TX_MODE);
