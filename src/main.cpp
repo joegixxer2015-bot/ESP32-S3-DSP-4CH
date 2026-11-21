@@ -39,14 +39,15 @@ float dbToLinear(float db) {
   return powf(10.0f, db / 20.0f);
 }
 
-// --- คลาสฟิลเตอร์ Biquad สำหรับ AudioTools ---
+// --- คลาสฟิลเตอร์ Biquad สำหรับ AudioTools (float ล้วน + ข้ามตอนเกน 0 dB) ---
 class SimpleBiquad : public AudioEffect {
 public:
   enum Mode { LOWPASS, HIGHPASS };
 
   SimpleBiquad(Mode mode, float freq, float sampleRate, float q = 0.707f)
-      : mode_(mode), freq_(freq), sampleRate_(sampleRate), q_(q), gainLinear_(1.0f) {
+      : mode_(mode), freq_(freq), sampleRate_(sampleRate), q_(q) {
     updateCoeffs();
+    setGainDb(0.0f);
   }
 
   AudioEffect* clone() override {
@@ -63,20 +64,18 @@ public:
   }
 
   effect_t process(effect_t input) override {
-    if (!active()) return input;
+    if (!active() || fabsf(gainDb_) < 0.05f) return input;
 
-    double x = (double)input;
-    double y = b0_ * x + b1_ * x1_ + b2_ * x2_ - a1_ * y1_ - a2_ * y2_;
+    float x = (float)input;
+    float y = b0_ * x + b1_ * x1_ + b2_ * x2_ - a1_ * y1_ - a2_ * y2_;
     x2_ = x1_;
     x1_ = x;
     y2_ = y1_;
     y1_ = y;
 
-    double bandSignal = y;
-    double out = x + (bandSignal - x) * (gainLinear_ - 1.0);
-
-    if (out > 32767.0) out = 32767.0;
-    if (out < -32768.0) out = -32768.0;
+    float out = x + (y - x) * (gainLinear_ - 1.0f);
+    if (out > 32767.0f) out = 32767.0f;
+    if (out < -32768.0f) out = -32768.0f;
     return (effect_t)out;
   }
 
@@ -87,28 +86,29 @@ private:
     float cs = cosf(omega);
     float alpha = sn / (2.0f * q_);
 
-    double a0 = 1.0;
+    float a0 = 1.0f;
     if (mode_ == LOWPASS) {
-      b0_ = (1.0 - cs) / 2.0;
-      b1_ = 1.0 - cs;
-      b2_ = (1.0 - cs) / 2.0;
-      a0 = 1.0 + alpha;
-      a1_ = -2.0 * cs;
-      a2_ = 1.0 - alpha;
+      b0_ = (1.0f - cs) * 0.5f;
+      b1_ = 1.0f - cs;
+      b2_ = (1.0f - cs) * 0.5f;
+      a0 = 1.0f + alpha;
+      a1_ = -2.0f * cs;
+      a2_ = 1.0f - alpha;
     } else {
-      b0_ = (1.0 + cs) / 2.0;
-      b1_ = -(1.0 + cs);
-      b2_ = (1.0 + cs) / 2.0;
-      a0 = 1.0 + alpha;
-      a1_ = -2.0 * cs;
-      a2_ = 1.0 - alpha;
+      b0_ = (1.0f + cs) * 0.5f;
+      b1_ = -(1.0f + cs);
+      b2_ = (1.0f + cs) * 0.5f;
+      a0 = 1.0f + alpha;
+      a1_ = -2.0f * cs;
+      a2_ = 1.0f - alpha;
     }
 
-    b0_ /= a0;
-    b1_ /= a0;
-    b2_ /= a0;
-    a1_ /= a0;
-    a2_ /= a0;
+    float invA0 = 1.0f / a0;
+    b0_ *= invA0;
+    b1_ *= invA0;
+    b2_ *= invA0;
+    a1_ *= invA0;
+    a2_ *= invA0;
   }
 
   Mode mode_;
@@ -118,16 +118,16 @@ private:
   float gainDb_ = 0.0f;
   float gainLinear_ = 1.0f;
 
-  double b0_ = 1.0, b1_ = 0.0, b2_ = 0.0, a1_ = 0.0, a2_ = 0.0;
-  double x1_ = 0.0, x2_ = 0.0, y1_ = 0.0, y2_ = 0.0;
+  float b0_ = 1.0f, b1_ = 0.0f, b2_ = 0.0f, a1_ = 0.0f, a2_ = 0.0f;
+  float x1_ = 0.0f, x2_ = 0.0f, y1_ = 0.0f, y2_ = 0.0f;
 };
 
 // --- ระบบสตรีมมิ่งพร้อมท่อ EQ (เริ่มต้นเกน 0 dB ทุกย่าน) ---
 I2SStream i2sStreamIn;   
 I2SStream i2sStreamOut;  
 
-// ถังพักข้อมูลฝั่งรับบน PSRAM
-BufferedStream bufferedIn(i2sStreamIn, 16384);
+// ถังพักข้อมูลฝั่งรับ (ขยายเป็น 32768 ไบต์)
+BufferedStream bufferedIn(i2sStreamIn, 32768);
 
 // ท่อเอฟเฟกต์ EQ 3 ย่าน
 AudioEffectStream eqStream(bufferedIn);
@@ -247,7 +247,7 @@ void setupI2S() {
     Serial.println("[ERROR] I2S RX (Port 0) begin failed!");
   }
 
-  // เริ่มต้น Buffer บน PSRAM
+  // เริ่มต้น Buffer
   bufferedIn.begin();
 
   // เริ่มต้นท่อ EQ (เกนเริ่มต้น 0 dB)
