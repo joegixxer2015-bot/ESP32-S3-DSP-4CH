@@ -34,7 +34,7 @@ I2SStream i2sStreamIn;
 I2SStream i2sStreamOut;  
 
 // ถังพักข้อมูลฝั่งรับ (32KB บน PSRAM)
-BufferedStream bufferedIn(i2sStreamIn, 32768); 
+BufferedStream bufferedIn(i2sStreamIn, 16384); 
 
 // ตัวปรับระดับความดังปลายทางก่อนออก DAC
 VolumeStream volumeControl(i2sStreamOut); 
