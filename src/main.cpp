@@ -30,6 +30,96 @@ struct_message incomingData;
 // ตั้งค่ารูปแบบเสียงพื้นฐาน: 44.1kHz, Stereo, 16-bit
 AudioInfo info(44100, 2, 16);
 
+// ค่าเกนเริ่มต้น = 0.0 dB (เทสสายพานก่อนค่อยเพิ่มเกน)
+float bassGainDb   = 0.0f;
+float midGainDb    = 0.0f;
+float trebleGainDb = 0.0f;
+
+float dbToLinear(float db) {
+  return powf(10.0f, db / 20.0f);
+}
+
+// --- คลาสฟิลเตอร์ Biquad แบบง่าย รองรับ Low-pass / High-pass / Peaking-like ---
+class SimpleBiquad : public AudioEffect {
+public:
+  enum Mode { LOWPASS, HIGHPASS };
+
+  SimpleBiquad(Mode mode, float freq, float sampleRate, float q = 0.707f)
+      : mode_(mode), freq_(freq), sampleRate_(sampleRate), q_(q), gainLinear_(1.0f) {
+    updateCoeffs();
+  }
+
+  void setGainDb(float db) {
+    gainDb_ = db;
+    gainLinear_ = dbToLinear(db);
+  }
+
+  float getGainDb() const {
+    return gainDb_;
+  }
+
+  effect_t process(effect_t input) override {
+    if (!active()) return input;
+
+    // กรองแยกย่านความถี่ด้วย Biquad แล้วผสมเกนกลับ
+    double x = (double)input;
+    double y = b0_ * x + b1_ * x1_ + b2_ * x2_ - a1_ * y1_ - a2_ * y2_;
+    x2_ = x1_;
+    x1_ = x;
+    y2_ = y1_;
+    y1_ = y;
+
+    // ถ้าเกนเป็น 0 dB (gainLinear ~ 1.0) ให้ส่งสัญญาณตรงไม่เปลี่ยนระดับเสียงหลัก
+    double bandSignal = y;
+    double out = x + (bandSignal - x) * (gainLinear_ - 1.0);
+
+    if (out > 32767.0) out = 32767.0;
+    if (out < -32768.0) out = -32768.0;
+    return (effect_t)out;
+  }
+
+private:
+  void updateCoeffs() {
+    float omega = 2.0f * (float)M_PI * freq_ / sampleRate_;
+    float sn = sinf(omega);
+    float cs = cosf(omega);
+    float alpha = sn / (2.0f * q_);
+
+    double a0 = 1.0;
+    if (mode_ == LOWPASS) {
+      b0_ = (1.0 - cs) / 2.0;
+      b1_ = 1.0 - cs;
+      b2_ = (1.0 - cs) / 2.0;
+      a0 = 1.0 + alpha;
+      a1_ = -2.0 * cs;
+      a2_ = 1.0 - alpha;
+    } else {
+      b0_ = (1.0 + cs) / 2.0;
+      b1_ = -(1.0 + cs);
+      b2_ = (1.0 + cs) / 2.0;
+      a0 = 1.0 + alpha;
+      a1_ = -2.0 * cs;
+      a2_ = 1.0 - alpha;
+    }
+
+    b0_ /= a0;
+    b1_ /= a0;
+    b2_ /= a0;
+    a1_ /= a0;
+    a2_ /= a0;
+  }
+
+  Mode mode_;
+  float freq_;
+  float sampleRate_;
+  float q_;
+  float gainDb_ = 0.0f;
+  float gainLinear_ = 1.0f;
+
+  double b0_ = 1.0, b1_ = 0.0, b2_ = 0.0, a1_ = 0.0, a2_ = 0.0;
+  double x1_ = 0.0, x2_ = 0.0, y1_ = 0.0, y2_ = 0.0;
+};
+
 // --- ระบบสตรีมมิ่งพร้อมท่อ EQ (เริ่มต้นเกน 0 dB ทุกย่าน) ---
 I2SStream i2sStreamIn;   
 I2SStream i2sStreamOut;  
@@ -37,35 +127,25 @@ I2SStream i2sStreamOut;
 // ถังพักข้อมูลฝั่งรับบน PSRAM
 BufferedStream bufferedIn(i2sStreamIn, 16384);
 
-// ท่อเอฟเฟกต์ EQ 3 ย่าน (Low Shelf / Peaking / High Shelf)
+// ท่อเอฟเฟกต์ EQ 3 ย่าน
 AudioEffectStream eqStream(bufferedIn);
 
-// ค่าเกนเริ่มต้น = 0 dB (เทสสายพานก่อนค่อยเพิ่มเกน)
-float bassGainDb   = 0.0f;
-float midGainDb    = 0.0f;
-float trebleGainDb = 0.0f;
-
-BiQuadFilterEffect bassFilter(LP_MODE, 120.0f, info.sample_rate);
-BiQuadFilterEffect midFilter(LP_MODE, 1000.0f, info.sample_rate);
-BiQuadFilterEffect trebleFilter(HP_MODE, 4500.0f, info.sample_rate);
+SimpleBiquad bassFilter(SimpleBiquad::LOWPASS, 120.0f, (float)info.sample_rate);
+SimpleBiquad midFilter(SimpleBiquad::LOWPASS, 1000.0f, (float)info.sample_rate);
+SimpleBiquad trebleFilter(SimpleBiquad::HIGHPASS, 4500.0f, (float)info.sample_rate);
 
 // ตัวปรับระดับความดังปลายทางก่อนออก DAC
 VolumeStream volumeControl(eqStream);
 
-// ตัวเชื่อมสายพาน: bufferedIn -> eqStream -> volumeControl -> i2sStreamOut
-StreamCopy copier(volumeControl, i2sStreamOut);
+// ตัวเชื่อมสายพาน: volumeControl -> i2sStreamOut
+StreamCopy copier(i2sStreamOut, volumeControl);
 
 unsigned long lastKeepAliveCheck = 0;
 
-// แปลง dB เป็น linear gain สำหรับฟิลเตอร์
-float dbToLinear(float db) {
-  return powf(10.0f, db / 20.0f);
-}
-
 void applyEqGains() {
-  bassFilter.setGain(dbToLinear(bassGainDb));
-  midFilter.setGain(dbToLinear(midGainDb));
-  trebleFilter.setGain(dbToLinear(trebleGainDb));
+  bassFilter.setGainDb(bassGainDb);
+  midFilter.setGainDb(midGainDb);
+  trebleFilter.setGainDb(trebleGainDb);
 }
 
 // --- ฟังก์ชันรับข้อมูล ESP-NOW ---
@@ -97,19 +177,19 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingDataPtr, int le
       volumeControl.setVolume(volFactor);
       break;
     }
-    case 1: { // Bass Gain (-12 ถึง +12 dB หากส่งมาเป็นช่วงค่าอื่นให้ปรับ map ตามต้องการ)
+    case 1: { // Bass Gain (-12 ถึง +12 dB)
       bassGainDb = constrain((float)incomingData.value, -12.0f, 12.0f);
       applyEqGains();
       Serial.printf("--> Set Bass Gain: %.1f dB\n", bassGainDb);
       break;
     }
-    case 2: { // Mid Gain
+    case 2: { // Mid Gain (-12 ถึง +12 dB)
       midGainDb = constrain((float)incomingData.value, -12.0f, 12.0f);
       applyEqGains();
       Serial.printf("--> Set Mid Gain: %.1f dB\n", midGainDb);
       break;
     }
-    case 3: { // Treble Gain
+    case 3: { // Treble Gain (-12 ถึง +12 dB)
       trebleGainDb = constrain((float)incomingData.value, -12.0f, 12.0f);
       applyEqGains();
       Serial.printf("--> Set Treble Gain: %.1f dB\n", trebleGainDb);
