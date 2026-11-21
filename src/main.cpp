@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
+#include <math.h>
 #include "rom/gpio.h"
 #include "driver/gpio.h"
 #include "AudioTools.h"
@@ -29,20 +30,43 @@ struct_message incomingData;
 // ตั้งค่ารูปแบบเสียงพื้นฐาน: 44.1kHz, Stereo, 16-bit
 AudioInfo info(44100, 2, 16);
 
-// --- ระบบสตรีมมิ่งเส้นทางตรง (ตัดท่อ EQ ออกแล้ว) ---
+// --- ระบบสตรีมมิ่งพร้อมท่อ EQ (เริ่มต้นเกน 0 dB ทุกย่าน) ---
 I2SStream i2sStreamIn;   
 I2SStream i2sStreamOut;  
 
-// ถังพักข้อมูลฝั่งรับ (32KB บน PSRAM)
-BufferedStream bufferedIn(i2sStreamIn, 16384); 
+// ถังพักข้อมูลฝั่งรับบน PSRAM
+BufferedStream bufferedIn(i2sStreamIn, 16384);
+
+// ท่อเอฟเฟกต์ EQ 3 ย่าน (Low Shelf / Peaking / High Shelf)
+AudioEffectStream eqStream(bufferedIn);
+
+// ค่าเกนเริ่มต้น = 0 dB (เทสสายพานก่อนค่อยเพิ่มเกน)
+float bassGainDb   = 0.0f;
+float midGainDb    = 0.0f;
+float trebleGainDb = 0.0f;
+
+BiQuadFilterEffect bassFilter(LP_MODE, 120.0f, info.sample_rate);
+BiQuadFilterEffect midFilter(LP_MODE, 1000.0f, info.sample_rate);
+BiQuadFilterEffect trebleFilter(HP_MODE, 4500.0f, info.sample_rate);
 
 // ตัวปรับระดับความดังปลายทางก่อนออก DAC
-VolumeStream volumeControl(i2sStreamOut); 
+VolumeStream volumeControl(eqStream);
 
-// ตัวเชื่อมสายพาน: ดึงจาก Buffer เข้า VolumeStream แล้วออก DAC โดยตรง
-StreamCopy copier(volumeControl, bufferedIn);
+// ตัวเชื่อมสายพาน: bufferedIn -> eqStream -> volumeControl -> i2sStreamOut
+StreamCopy copier(volumeControl, i2sStreamOut);
 
 unsigned long lastKeepAliveCheck = 0;
+
+// แปลง dB เป็น linear gain สำหรับฟิลเตอร์
+float dbToLinear(float db) {
+  return powf(10.0f, db / 20.0f);
+}
+
+void applyEqGains() {
+  bassFilter.setGain(dbToLinear(bassGainDb));
+  midFilter.setGain(dbToLinear(midGainDb));
+  trebleFilter.setGain(dbToLinear(trebleGainDb));
+}
 
 // --- ฟังก์ชันรับข้อมูล ESP-NOW ---
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
@@ -69,19 +93,28 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingDataPtr, int le
 
   switch (safeMode) {
     case 0: { // Master Volume (0-100 แปลงเป็น 0.0 - 1.0)
-      float volFactor = (float)incomingData.value / 100.0f;
+      float volFactor = constrain((float)incomingData.value / 100.0f, 0.0f, 1.0f);
       volumeControl.setVolume(volFactor);
       break;
     }
-    case 1: 
-      Serial.printf("--> Set Bass Gain: %d dB (EQ bypassed for test)\n", incomingData.value);
+    case 1: { // Bass Gain (-12 ถึง +12 dB หากส่งมาเป็นช่วงค่าอื่นให้ปรับ map ตามต้องการ)
+      bassGainDb = constrain((float)incomingData.value, -12.0f, 12.0f);
+      applyEqGains();
+      Serial.printf("--> Set Bass Gain: %.1f dB\n", bassGainDb);
       break;
-    case 2: 
-      Serial.printf("--> Set Mid Gain: %d dB (EQ bypassed for test)\n", incomingData.value);
+    }
+    case 2: { // Mid Gain
+      midGainDb = constrain((float)incomingData.value, -12.0f, 12.0f);
+      applyEqGains();
+      Serial.printf("--> Set Mid Gain: %.1f dB\n", midGainDb);
       break;
-    case 3: 
-      Serial.printf("--> Set Treble Gain: %d dB (EQ bypassed for test)\n", incomingData.value);
+    }
+    case 3: { // Treble Gain
+      trebleGainDb = constrain((float)incomingData.value, -12.0f, 12.0f);
+      applyEqGains();
+      Serial.printf("--> Set Treble Gain: %.1f dB\n", trebleGainDb);
       break;
+    }
   }
 }
 
@@ -103,6 +136,19 @@ void initWifiAndEspNow() {
   }
 }
 
+void setupEQ() {
+  applyEqGains();
+  eqStream.addEffect(bassFilter);
+  eqStream.addEffect(midFilter);
+  eqStream.addEffect(trebleFilter);
+
+  auto eqCfg = eqStream.defaultConfig();
+  eqCfg.copyFrom(info);
+  if (!eqStream.begin(eqCfg)) {
+    Serial.println("[ERROR] EQ Stream begin failed!");
+  }
+}
+
 // --- ตั้งค่าพอร์ต I2S ทั้งขาเข้า (Port 0) และขาออก (Port 1) ---
 void setupI2S() {
   // 1. ตั้งค่าฝั่งรับเข้า (Input - Slave RX) จาก DevKit V1 ใช้ I2S Port 0
@@ -121,6 +167,9 @@ void setupI2S() {
 
   // เริ่มต้น Buffer บน PSRAM
   bufferedIn.begin();
+
+  // เริ่มต้นท่อ EQ (เกนเริ่มต้น 0 dB)
+  setupEQ();
 
   // 2. ตั้งค่าฝั่งส่งออก (Output - Master TX) ไปยัง DAC PCM5102A ใช้ I2S Port 1
   auto configOut = i2sStreamOut.defaultConfig(TX_MODE);
@@ -157,7 +206,7 @@ void setup() {
 
   Serial.print("ESP32-S3 STA MAC Address: ");
   Serial.println(WiFi.macAddress());
-  Serial.println(">> ESP32-S3 Direct Test Ready (No EQ)! <<");
+  Serial.println(">> ESP32-S3 EQ Test Ready (Initial Gain = 0.0 dB) <<");
 }
 
 void loop() {
