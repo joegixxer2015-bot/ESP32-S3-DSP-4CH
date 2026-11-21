@@ -39,7 +39,7 @@ float dbToLinear(float db) {
   return powf(10.0f, db / 20.0f);
 }
 
-// --- คลาสฟิลเตอร์ Biquad แบบง่าย รองรับ Low-pass / High-pass / Peaking-like ---
+// --- คลาสฟิลเตอร์ Biquad สำหรับ AudioTools ---
 class SimpleBiquad : public AudioEffect {
 public:
   enum Mode { LOWPASS, HIGHPASS };
@@ -47,6 +47,10 @@ public:
   SimpleBiquad(Mode mode, float freq, float sampleRate, float q = 0.707f)
       : mode_(mode), freq_(freq), sampleRate_(sampleRate), q_(q), gainLinear_(1.0f) {
     updateCoeffs();
+  }
+
+  AudioEffect* clone() override {
+    return new SimpleBiquad(*this);
   }
 
   void setGainDb(float db) {
@@ -61,7 +65,6 @@ public:
   effect_t process(effect_t input) override {
     if (!active()) return input;
 
-    // กรองแยกย่านความถี่ด้วย Biquad แล้วผสมเกนกลับ
     double x = (double)input;
     double y = b0_ * x + b1_ * x1_ + b2_ * x2_ - a1_ * y1_ - a2_ * y2_;
     x2_ = x1_;
@@ -69,7 +72,6 @@ public:
     y2_ = y1_;
     y1_ = y;
 
-    // ถ้าเกนเป็น 0 dB (gainLinear ~ 1.0) ให้ส่งสัญญาณตรงไม่เปลี่ยนระดับเสียงหลัก
     double bandSignal = y;
     double out = x + (bandSignal - x) * (gainLinear_ - 1.0);
 
