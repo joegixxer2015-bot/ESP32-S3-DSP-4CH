@@ -181,8 +181,8 @@ I2SStream i2sStreamOut;
 BufferedStream bufferedIn(i2sStreamIn, 32768);
 AudioEffectStream eqStream(bufferedIn);
 
-// จุดตัดฟีลปรีแอมป์/แอมป์จิ๋ว: Bass 100Hz, Mid 1000Hz, Treble 6500Hz
-StereoEqBand bassEq(StereoEqBand::LOW_SHELF, 100.0f, (float)info.sample_rate, 0.75f);
+// จูนเบสที่ 125Hz (Q=0.7) เพื่อดึงเนื้อเบสให้ชัดขึ้น ส่วน Mid 1000Hz และ Treble 6500Hz คงฟีลเดิม
+StereoEqBand bassEq(StereoEqBand::LOW_SHELF, 125.0f, (float)info.sample_rate, 0.7f);
 StereoEqBand midEq(StereoEqBand::PEAKING, 1000.0f, (float)info.sample_rate, 0.9f);
 StereoEqBand trebleEq(StereoEqBand::HIGH_SHELF, 6500.0f, (float)info.sample_rate, 0.75f);
 
@@ -225,7 +225,8 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingDataPtr, int le
       break;
     }
     case 1: {
-      targetBassGainDb = constrain((float)incomingData.value, -12.0f, 12.0f);
+      // ขยายช่วงเบสเป็น -15 ถึง +15 dB ให้เนื้อมาชัดขึ้น
+      targetBassGainDb = constrain((float)incomingData.value, -15.0f, 15.0f);
       eqDirty = true;
       break;
     }
@@ -321,7 +322,7 @@ void setup() {
 
   Serial.print("ESP32-S3 STA MAC Address: ");
   Serial.println(WiFi.macAddress());
-  Serial.println(">> ESP32-S3 Preamp EQ Ready (L/R Separated) <<");
+  Serial.println(">> ESP32-S3 Preamp EQ Ready (Bass 125Hz Tuned) <<");
 }
 
 void loop() {
