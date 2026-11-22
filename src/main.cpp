@@ -30,7 +30,7 @@ struct_message incomingData;
 // ตั้งค่ารูปแบบเสียงพื้นฐาน: 44.1kHz, Stereo, 16-bit
 AudioInfo info(44100, 2, 16);
 
-// ตัวแปรสถานะสำหรับรับค่าจาก ESP-NOW อย่างปลอดภัย (ไม่ให้กวนลูปเสียง)
+// ตัวแปรสถานะสำหรับรับค่าจาก ESP-NOW อย่างปลอดภัย
 volatile float targetBassGainDb   = 0.0f;
 volatile float targetMidGainDb    = 0.0f;
 volatile float targetTrebleGainDb = 0.0f;
@@ -43,39 +43,33 @@ volatile bool  logDirty           = false;
 volatile int   lastModeLog        = 0;
 volatile int   lastValLog         = 0;
 
-float dbToLinear(float db) {
-  return powf(10.0f, db / 20.0f);
-}
-
-// --- คลาสฟิลเตอร์ Biquad สำหรับ AudioTools (float ล้วน + ข้ามตอนเกน 0 dB) ---
-class SimpleBiquad : public AudioEffect {
+// --- คลาสฟิลเตอร์ EQ สเตอริโอ (แยกสถานะซ้าย L / ขวา R ขาดจากกัน) ---
+class StereoEqBand : public AudioEffect {
 public:
-  enum Mode { LOWPASS, HIGHPASS };
+  enum BandType { LOW_SHELF, PEAKING, HIGH_SHELF };
 
-  SimpleBiquad(Mode mode, float freq, float sampleRate, float q = 0.707f)
-      : mode_(mode), freq_(freq), sampleRate_(sampleRate), q_(q) {
-    updateCoeffs();
+  StereoEqBand(BandType type, float freq, float sampleRate, float q = 0.8f)
+      : type_(type), freq_(freq), sampleRate_(sampleRate), q_(q) {
     setGainDb(0.0f);
     liveInstance_ = this;
   }
 
-  SimpleBiquad(const SimpleBiquad& other) = default;
+  StereoEqBand(const StereoEqBand& other) = default;
 
   AudioEffect* clone() override {
-    SimpleBiquad* copy = new SimpleBiquad(*this);
-    copy->liveInstance_ = copy;
-    // เก็บพอยน์เตอร์ตัวที่ถูก AudioEffectStream โคลนไปใช้งานจริง
+    StereoEqBand* copy = new StereoEqBand(*this);
+    resetState(copy);
     liveInstance_ = copy;
     return copy;
   }
 
-  SimpleBiquad* activeInstance() {
+  StereoEqBand* activeInstance() {
     return liveInstance_ ? liveInstance_ : this;
   }
 
   void setGainDb(float db) {
     gainDb_ = db;
-    gainLinear_ = dbToLinear(db);
+    updateCoeffs();
   }
 
   float getGainDb() const {
@@ -83,95 +77,126 @@ public:
   }
 
   effect_t process(effect_t input) override {
-    if (!active() || fabsf(gainDb_) < 0.05f) return input;
+    if (!active() || fabsf(gainDb_) < 0.05f) {
+      isLeftSample_ = !isLeftSample_;
+      return input;
+    }
 
     float x = (float)input;
-    float y = b0_ * x + b1_ * x1_ + b2_ * x2_ - a1_ * y1_ - a2_ * y2_;
-    x2_ = x1_;
-    x1_ = x;
-    y2_ = y1_;
-    y1_ = y;
+    float y;
 
-    float out = x + (y - x) * (gainLinear_ - 1.0f);
-    if (out > 32767.0f) out = 32767.0f;
-    if (out < -32768.0f) out = -32768.0f;
-    return (effect_t)out;
+    if (!isLeftSample_) {
+      // แซมเปิลฝั่งซ้าย (L)
+      y = b0_ * x + b1_ * x1L_ + b2_ * x2L_ - a1_ * y1L_ - a2_ * y2L_;
+      x2L_ = x1L_;
+      x1L_ = x;
+      y2L_ = y1L_;
+      y1L_ = y;
+    } else {
+      // แซมเปิลฝั่งขวา (R)
+      y = b0_ * x + b1_ * x1R_ + b2_ * x2R_ - a1_ * y1R_ - a2_ * y2R_;
+      x2R_ = x1R_;
+      x1R_ = x;
+      y2R_ = y1R_;
+      y1R_ = y;
+    }
+
+    // สลับข้าง L <-> R ทุกแซมเปิลตามโครงสร้าง Interleaved Stereo
+    isLeftSample_ = !isLeftSample_;
+
+    if (y > 32767.0f) y = 32767.0f;
+    if (y < -32768.0f) y = -32768.0f;
+    return (effect_t)y;
   }
 
 private:
+  static void resetState(StereoEqBand* band) {
+    band->isLeftSample_ = false;
+    band->x1L_ = band->x2L_ = band->y1L_ = band->y2L_ = 0.0f;
+    band->x1R_ = band->x2R_ = band->y1R_ = band->y2R_ = 0.0f;
+  }
+
   void updateCoeffs() {
+    float A = powf(10.0f, gainDb_ / 40.0f);
     float omega = 2.0f * (float)M_PI * freq_ / sampleRate_;
     float sn = sinf(omega);
     float cs = cosf(omega);
     float alpha = sn / (2.0f * q_);
 
-    float a0 = 1.0f;
-    if (mode_ == LOWPASS) {
-      b0_ = (1.0f - cs) * 0.5f;
-      b1_ = 1.0f - cs;
-      b2_ = (1.0f - cs) * 0.5f;
-      a0 = 1.0f + alpha;
-      a1_ = -2.0f * cs;
-      a2_ = 1.0f - alpha;
+    float b0 = 1.0f, b1 = 0.0f, b2 = 0.0f, a0 = 1.0f, a1 = 0.0f, a2 = 0.0f;
+
+    if (type_ == LOW_SHELF) {
+      float twoSqrtAAlpha = 2.0f * sqrtf(A) * alpha;
+      b0 = A * ((A + 1.0f) - (A - 1.0f) * cs + twoSqrtAAlpha);
+      b1 = 2.0f * A * ((A - 1.0f) - (A + 1.0f) * cs);
+      b2 = A * ((A + 1.0f) - (A - 1.0f) * cs - twoSqrtAAlpha);
+      a0 = (A + 1.0f) + (A - 1.0f) * cs + twoSqrtAAlpha;
+      a1 = -2.0f * ((A - 1.0f) + (A + 1.0f) * cs);
+      a2 = (A + 1.0f) + (A - 1.0f) * cs - twoSqrtAAlpha;
+    } else if (type_ == HIGH_SHELF) {
+      float twoSqrtAAlpha = 2.0f * sqrtf(A) * alpha;
+      b0 = A * ((A + 1.0f) + (A - 1.0f) * cs + twoSqrtAAlpha);
+      b1 = -2.0f * A * ((A - 1.0f) + (A + 1.0f) * cs);
+      b2 = A * ((A + 1.0f) + (A - 1.0f) * cs - twoSqrtAAlpha);
+      a0 = (A + 1.0f) - (A - 1.0f) * cs + twoSqrtAAlpha;
+      a1 = 2.0f * ((A - 1.0f) - (A + 1.0f) * cs);
+      a2 = (A + 1.0f) - (A - 1.0f) * cs - twoSqrtAAlpha;
     } else {
-      b0_ = (1.0f + cs) * 0.5f;
-      b1_ = -(1.0f + cs);
-      b2_ = (1.0f + cs) * 0.5f;
-      a0 = 1.0f + alpha;
-      a1_ = -2.0f * cs;
-      a2_ = 1.0f - alpha;
+      // PEAKING (ย่านกลาง)
+      b0 = 1.0f + alpha * A;
+      b1 = -2.0f * cs;
+      b2 = 1.0f - alpha * A;
+      a0 = 1.0f + alpha / A;
+      a1 = -2.0f * cs;
+      a2 = 1.0f - alpha / A;
     }
 
     float invA0 = 1.0f / a0;
-    b0_ *= invA0;
-    b1_ *= invA0;
-    b2_ *= invA0;
-    a1_ *= invA0;
-    a2_ *= invA0;
+    b0_ = b0 * invA0;
+    b1_ = b1 * invA0;
+    b2_ = b2 * invA0;
+    a1_ = a1 * invA0;
+    a2_ = a2 * invA0;
   }
 
-  Mode mode_;
+  BandType type_;
   float freq_;
   float sampleRate_;
   float q_;
   float gainDb_ = 0.0f;
-  float gainLinear_ = 1.0f;
 
   float b0_ = 1.0f, b1_ = 0.0f, b2_ = 0.0f, a1_ = 0.0f, a2_ = 0.0f;
-  float x1_ = 0.0f, x2_ = 0.0f, y1_ = 0.0f, y2_ = 0.0f;
 
-  SimpleBiquad* liveInstance_ = nullptr;
+  bool isLeftSample_ = false;
+  float x1L_ = 0.0f, x2L_ = 0.0f, y1L_ = 0.0f, y2L_ = 0.0f;
+  float x1R_ = 0.0f, x2R_ = 0.0f, y1R_ = 0.0f, y2R_ = 0.0f;
+
+  StereoEqBand* liveInstance_ = nullptr;
 };
 
-// --- ระบบสตรีมมิ่งพร้อมท่อ EQ (เริ่มต้นเกน 0 dB ทุกย่าน) ---
+// --- ระบบสตรีมมิ่งพร้อมท่อ EQ แบบปรีแอมป์ (เริ่มต้น 0 dB ทุกย่าน) ---
 I2SStream i2sStreamIn;
 I2SStream i2sStreamOut;
 
-// ถังพักข้อมูลฝั่งรับ (32768 ไบต์)
 BufferedStream bufferedIn(i2sStreamIn, 32768);
-
-// ท่อเอฟเฟกต์ EQ 3 ย่าน
 AudioEffectStream eqStream(bufferedIn);
 
-SimpleBiquad bassFilter(SimpleBiquad::LOWPASS, 120.0f, (float)info.sample_rate);
-SimpleBiquad midFilter(SimpleBiquad::LOWPASS, 1000.0f, (float)info.sample_rate);
-SimpleBiquad trebleFilter(SimpleBiquad::HIGHPASS, 4500.0f, (float)info.sample_rate);
+// จุดตัดฟีลปรีแอมป์/แอมป์จิ๋ว: Bass 100Hz, Mid 1000Hz, Treble 6500Hz
+StereoEqBand bassEq(StereoEqBand::LOW_SHELF, 100.0f, (float)info.sample_rate, 0.75f);
+StereoEqBand midEq(StereoEqBand::PEAKING, 1000.0f, (float)info.sample_rate, 0.9f);
+StereoEqBand trebleEq(StereoEqBand::HIGH_SHELF, 6500.0f, (float)info.sample_rate, 0.75f);
 
-// ตัวปรับระดับความดังปลายทางก่อนออก DAC
 VolumeStream volumeControl(eqStream);
-
-// ตัวเชื่อมสายพาน: volumeControl -> i2sStreamOut
 StreamCopy copier(i2sStreamOut, volumeControl);
 
 unsigned long lastKeepAliveCheck = 0;
 
 void applyEqGains() {
-  if (bassFilter.activeInstance())   bassFilter.activeInstance()->setGainDb(targetBassGainDb);
-  if (midFilter.activeInstance())    midFilter.activeInstance()->setGainDb(targetMidGainDb);
-  if (trebleFilter.activeInstance()) trebleFilter.activeInstance()->setGainDb(targetTrebleGainDb);
+  if (bassEq.activeInstance())   bassEq.activeInstance()->setGainDb(targetBassGainDb);
+  if (midEq.activeInstance())    midEq.activeInstance()->setGainDb(targetMidGainDb);
+  if (trebleEq.activeInstance()) trebleEq.activeInstance()->setGainDb(targetTrebleGainDb);
 }
 
-// --- ฟังก์ชันรับข้อมูล ESP-NOW (ทำงานให้สั้นและเร็วที่สุด) ---
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
 void OnDataRecv(const esp_now_recv_info_t * recv_info, const uint8_t *incomingDataPtr, int len) {
 #else
@@ -194,22 +219,22 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingDataPtr, int le
   if (incomingData.isMuted) return;
 
   switch (safeMode) {
-    case 0: { // Master Volume (0-100 แปลงเป็น 0.0 - 1.0)
+    case 0: {
       targetVolume = constrain((float)incomingData.value / 100.0f, 0.0f, 1.0f);
       volDirty = true;
       break;
     }
-    case 1: { // Bass Gain (-12 ถึง +12 dB)
+    case 1: {
       targetBassGainDb = constrain((float)incomingData.value, -12.0f, 12.0f);
       eqDirty = true;
       break;
     }
-    case 2: { // Mid Gain (-12 ถึง +12 dB)
+    case 2: {
       targetMidGainDb = constrain((float)incomingData.value, -12.0f, 12.0f);
       eqDirty = true;
       break;
     }
-    case 3: { // Treble Gain (-12 ถึง +12 dB)
+    case 3: {
       targetTrebleGainDb = constrain((float)incomingData.value, -12.0f, 12.0f);
       eqDirty = true;
       break;
@@ -217,7 +242,6 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingDataPtr, int le
   }
 }
 
-// --- ตั้งค่าระบบ Wi-Fi และ ESP-NOW ล็อกช่อง 1 ---
 void initWifiAndEspNow() {
   WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
@@ -236,9 +260,9 @@ void initWifiAndEspNow() {
 }
 
 void setupEQ() {
-  eqStream.addEffect(bassFilter);
-  eqStream.addEffect(midFilter);
-  eqStream.addEffect(trebleFilter);
+  eqStream.addEffect(bassEq);
+  eqStream.addEffect(midEq);
+  eqStream.addEffect(trebleEq);
 
   auto eqCfg = eqStream.defaultConfig();
   eqCfg.copyFrom(info);
@@ -249,9 +273,7 @@ void setupEQ() {
   applyEqGains();
 }
 
-// --- ตั้งค่าพอร์ต I2S ทั้งขาเข้า (Port 0) และขาออก (Port 1) ---
 void setupI2S() {
-  // 1. ตั้งค่าฝั่งรับเข้า (Input - Slave RX) จาก DevKit V1 ใช้ I2S Port 0
   auto configIn = i2sStreamIn.defaultConfig(RX_MODE);
   configIn.port_no = 0;
   configIn.sample_rate = 44100;
@@ -268,7 +290,6 @@ void setupI2S() {
   bufferedIn.begin();
   setupEQ();
 
-  // 2. ตั้งค่าฝั่งส่งออก (Output - Master TX) ไปยัง DAC PCM5102A ใช้ I2S Port 1
   auto configOut = i2sStreamOut.defaultConfig(TX_MODE);
   configOut.port_no = 1;
   configOut.sample_rate = 44100;
@@ -281,16 +302,13 @@ void setupI2S() {
     Serial.println("[ERROR] I2S TX (Port 1) begin failed!");
   }
 
-  // พ่วงสัญญาณขาออกชุดที่ 2 จาก I2S Port 1
   gpio_matrix_out(I2S_DATA2_PIN, i2s_periph_signal[I2S_NUM_1].data_out_sig, false, false);
 
-  // 3. เริ่มต้นระบบ Volume ที่ความดังเริ่มต้น 80%
   auto vconfig = volumeControl.defaultConfig();
   vconfig.copyFrom(info);
   volumeControl.begin(vconfig);
   volumeControl.setVolume(targetVolume);
 
-  // 4. เริ่มต้นตัวคัดลอกข้อมูลสตรีม
   copier.begin();
 }
 
@@ -303,7 +321,7 @@ void setup() {
 
   Serial.print("ESP32-S3 STA MAC Address: ");
   Serial.println(WiFi.macAddress());
-  Serial.println(">> ESP32-S3 EQ Ready <<");
+  Serial.println(">> ESP32-S3 Preamp EQ Ready (L/R Separated) <<");
 }
 
 void loop() {
