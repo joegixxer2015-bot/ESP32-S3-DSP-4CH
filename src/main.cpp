@@ -276,10 +276,9 @@ void setupEQ() {
 
 void setupI2S() {
   auto configIn = i2sStreamIn.defaultConfig(RX_MODE);
+  configIn.copyFrom(info);
+  configIn.rx_tx_mode = RX_MODE;
   configIn.port_no = 0;
-  configIn.sample_rate = 44100;
-  configIn.channels = 2;
-  configIn.bits_per_sample = 16;
   configIn.pin_bck = I2S_IN_BCK;
   configIn.pin_ws  = I2S_IN_LRCK;
   configIn.pin_data = I2S_IN_DATA;
@@ -292,10 +291,9 @@ void setupI2S() {
   setupEQ();
 
   auto configOut = i2sStreamOut.defaultConfig(TX_MODE);
+  configOut.copyFrom(info);
+  configOut.rx_tx_mode = TX_MODE;
   configOut.port_no = 1;
-  configOut.sample_rate = 44100;
-  configOut.channels = 2;
-  configOut.bits_per_sample = 16;
   configOut.pin_bck = I2S_BCK_PIN;
   configOut.pin_ws  = I2S_LRCK_PIN;
   configOut.pin_data = I2S_DATA1_PIN;
@@ -310,7 +308,7 @@ void setupI2S() {
   volumeControl.begin(vconfig);
   volumeControl.setVolume(targetVolume);
 
-  copier.begin(volumeControl, i2sStreamOut);
+  copier.begin(i2sStreamOut, volumeControl);
 }
 
 void setup() {
