@@ -288,7 +288,7 @@ void setupI2S() {
     Serial.println("[ERROR] I2S RX (Port 0) begin failed!");
   }
 
-  bufferedIn.begin(info);
+  bufferedIn.begin();
   setupEQ();
 
   auto configOut = i2sStreamOut.defaultConfig(TX_MODE);
