@@ -178,7 +178,7 @@ private:
 I2SStream i2sStreamIn;
 I2SStream i2sStreamOut;
 
-BufferedStream bufferedIn(i2sStreamIn, 32768);
+BufferedStream bufferedIn(i2sStreamIn, 65536);
 AudioEffectStream eqStream(bufferedIn);
 
 // จูนเบสที่ 125Hz (Q=0.7) เพื่อดึงเนื้อเบสให้ชัดขึ้น ส่วน Mid 1000Hz และ Treble 6500Hz คงฟีลเดิม
