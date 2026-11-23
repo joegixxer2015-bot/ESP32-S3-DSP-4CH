@@ -316,11 +316,12 @@ void setup() {
   delay(1000);
 
   setupI2S();
-  initWifiAndEspNow();
+  // พัก Wi-Fi และ ESP-NOW ชั่วคราวเพื่อตัดตัวแปรคลื่น 2.4 GHz กวนเสียง
+  // initWifiAndEspNow();
 
-  Serial.print("ESP32-S3 STA MAC Address: ");
-  Serial.println(WiFi.macAddress());
-  Serial.println(">> ESP32-S3 Preamp EQ Ready (Bass 125Hz Tuned) <<");
+  // Serial.print("ESP32-S3 STA MAC Address: ");
+  // Serial.println(WiFi.macAddress());
+  Serial.println(">> ESP32-S3 Preamp EQ Ready (Wi-Fi/ESP-NOW OFF) <<");
 }
 
 void loop() {
@@ -339,31 +340,6 @@ void loop() {
     eqDirty = false;
     applyEqGains();
   }
-
-  /* พักการพิมพ์ Serial และเช็กแชนเนล Wi-Fi ทุก 3 วินาทีชั่วคราวเพื่อดูผลต่อจังหวะสตรีม
-  if (logDirty) {
-    logDirty = false;
-    const char* modeNames[] = {"MASTER VOLUME", "BASS", "MID", "TREBLE"};
-    Serial.printf("[ESP-NOW] Mode: %s | Value: %d | Mute: %s (B:%.1f M:%.1f T:%.1f)\n",
-                  modeNames[lastModeLog],
-                  lastValLog,
-                  targetMuted ? "YES" : "NO",
-                  targetBassGainDb,
-                  targetMidGainDb,
-                  targetTrebleGainDb);
-  }
-
-  if (millis() - lastKeepAliveCheck > 3000) {
-    uint8_t primaryChan;
-    wifi_second_chan_t secondChan;
-    esp_wifi_get_channel(&primaryChan, &secondChan);
-
-    if (primaryChan != 1) {
-      esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
-    }
-    lastKeepAliveCheck = millis();
-  }
-  */
 
   delay(1);
 }
