@@ -278,7 +278,7 @@ void setupI2S() {
   configIn.pin_data = I2S_IN_DATA;
   configIn.is_master = false;
   // ตั้งบัฟเฟอร์ขาเข้าให้ชัดเจน ลดโอกาสจังหวะรับข้อมูลตึงหรือสะดุด
-  configIn.buffer_count = 8;
+  configIn.buffer_count = 16;
   configIn.buffer_size = 512;
   if (!i2sStreamIn.begin(configIn)) {
     Serial.println("[ERROR] I2S RX (Port 0) begin failed!");
@@ -295,7 +295,7 @@ void setupI2S() {
   configOut.pin_ws  = I2S_LRCK_PIN;
   configOut.pin_data = I2S_DATA1_PIN;
   // ตั้งบัฟเฟอร์ขาออกให้สอดคล้องกันเพื่อระบายข้อมูลไป DAC ได้ต่อเนื่อง
-  configOut.buffer_count = 8;
+  configOut.buffer_count = 12;
   configOut.buffer_size = 512;
   if (!i2sStreamOut.begin(configOut)) {
     Serial.println("[ERROR] I2S TX (Port 1) begin failed!");
