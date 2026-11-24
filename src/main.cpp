@@ -86,14 +86,12 @@ public:
     float y;
 
     if (!isLeftSample_) {
-      // แซมเปิลฝั่งซ้าย (L)
       y = b0_ * x + b1_ * x1L_ + b2_ * x2L_ - a1_ * y1L_ - a2_ * y2L_;
       x2L_ = x1L_;
       x1L_ = x;
       y2L_ = y1L_;
       y1L_ = y;
     } else {
-      // แซมเปิลฝั่งขวา (R)
       y = b0_ * x + b1_ * x1R_ + b2_ * x2R_ - a1_ * y1R_ - a2_ * y2R_;
       x2R_ = x1R_;
       x1R_ = x;
@@ -101,7 +99,6 @@ public:
       y1R_ = y;
     }
 
-    // สลับข้าง L <-> R ทุกแซมเปิลตามโครงสร้าง Interleaved Stereo
     isLeftSample_ = !isLeftSample_;
 
     if (y > 32767.0f) y = 32767.0f;
@@ -142,7 +139,6 @@ private:
       a1 = 2.0f * ((A - 1.0f) - (A + 1.0f) * cs);
       a2 = (A + 1.0f) - (A - 1.0f) * cs - twoSqrtAAlpha;
     } else {
-      // PEAKING (ย่านกลาง)
       b0 = 1.0f + alpha * A;
       b1 = -2.0f * cs;
       b2 = 1.0f - alpha * A;
@@ -181,7 +177,6 @@ I2SStream i2sStreamOut;
 BufferedStream bufferedIn(i2sStreamIn, 65536);
 AudioEffectStream eqStream(bufferedIn);
 
-// จูนเบสที่ 125Hz (Q=0.7) เพื่อดึงเนื้อเบสให้ชัดขึ้น ส่วน Mid 1000Hz และ Treble 6500Hz คงฟีลเดิม
 StereoEqBand bassEq(StereoEqBand::LOW_SHELF, 125.0f, (float)info.sample_rate, 0.7f);
 StereoEqBand midEq(StereoEqBand::PEAKING, 1000.0f, (float)info.sample_rate, 0.9f);
 StereoEqBand trebleEq(StereoEqBand::HIGH_SHELF, 6500.0f, (float)info.sample_rate, 0.75f);
@@ -225,7 +220,6 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingDataPtr, int le
       break;
     }
     case 1: {
-      // ขยายช่วงเบสเป็น -15 ถึง +15 dB ให้เนื้อมาชัดขึ้น
       targetBassGainDb = constrain((float)incomingData.value, -15.0f, 15.0f);
       eqDirty = true;
       break;
@@ -283,6 +277,9 @@ void setupI2S() {
   configIn.pin_ws  = I2S_IN_LRCK;
   configIn.pin_data = I2S_IN_DATA;
   configIn.is_master = false;
+  // ตั้งบัฟเฟอร์ขาเข้าให้ชัดเจน ลดโอกาสจังหวะรับข้อมูลตึงหรือสะดุด
+  configIn.buffer_count = 8;
+  configIn.buffer_size = 512;
   if (!i2sStreamIn.begin(configIn)) {
     Serial.println("[ERROR] I2S RX (Port 0) begin failed!");
   }
@@ -297,6 +294,9 @@ void setupI2S() {
   configOut.pin_bck = I2S_BCK_PIN;
   configOut.pin_ws  = I2S_LRCK_PIN;
   configOut.pin_data = I2S_DATA1_PIN;
+  // ตั้งบัฟเฟอร์ขาออกให้สอดคล้องกันเพื่อระบายข้อมูลไป DAC ได้ต่อเนื่อง
+  configOut.buffer_count = 8;
+  configOut.buffer_size = 512;
   if (!i2sStreamOut.begin(configOut)) {
     Serial.println("[ERROR] I2S TX (Port 1) begin failed!");
   }
@@ -319,9 +319,7 @@ void setup() {
   // พัก Wi-Fi และ ESP-NOW ชั่วคราวเพื่อตัดตัวแปรคลื่น 2.4 GHz กวนเสียง
   // initWifiAndEspNow();
 
-  // Serial.print("ESP32-S3 STA MAC Address: ");
-  // Serial.println(WiFi.macAddress());
-  Serial.println(">> ESP32-S3 Preamp EQ Ready (Wi-Fi/ESP-NOW OFF) <<");
+  Serial.println(">> ESP32-S3 Preamp EQ Ready (Buffer Tuned, No loop delay) <<");
 }
 
 void loop() {
@@ -340,6 +338,4 @@ void loop() {
     eqDirty = false;
     applyEqGains();
   }
-
-  delay(1);
 }
