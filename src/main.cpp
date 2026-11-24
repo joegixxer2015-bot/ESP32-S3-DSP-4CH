@@ -1,10 +1,11 @@
-#include <Arduino.h>
+#include <【entity-Arduino¦canonical_name=Arduino】.h>
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <math.h>
 #include "rom/gpio.h"
 #include "driver/gpio.h"
+#include "driver/i2s.h"
 #include "AudioTools.h"
 
 // --- พินฝั่งขาออก (Output ไปยัง DAC PCM5102A) ---
@@ -174,7 +175,7 @@ private:
 I2SStream i2sStreamIn;
 I2SStream i2sStreamOut;
 
-BufferedStream bufferedIn(i2sStreamIn, 65536);
+BufferedStream bufferedIn(i2sStreamIn, 16384);
 AudioEffectStream eqStream(bufferedIn);
 
 StereoEqBand bassEq(StereoEqBand::LOW_SHELF, 125.0f, (float)info.sample_rate, 0.7f);
@@ -277,7 +278,6 @@ void setupI2S() {
   configIn.pin_ws  = I2S_IN_LRCK;
   configIn.pin_data = I2S_IN_DATA;
   configIn.is_master = false;
-  // ตั้งบัฟเฟอร์ขาเข้าให้ชัดเจน ลดโอกาสจังหวะรับข้อมูลตึงหรือสะดุด
   configIn.buffer_count = 16;
   configIn.buffer_size = 512;
   if (!i2sStreamIn.begin(configIn)) {
@@ -294,7 +294,6 @@ void setupI2S() {
   configOut.pin_bck = I2S_BCK_PIN;
   configOut.pin_ws  = I2S_LRCK_PIN;
   configOut.pin_data = I2S_DATA1_PIN;
-  // ตั้งบัฟเฟอร์ขาออกให้สอดคล้องกันเพื่อระบายข้อมูลไป DAC ได้ต่อเนื่อง
   configOut.buffer_count = 12;
   configOut.buffer_size = 512;
   if (!i2sStreamOut.begin(configOut)) {
@@ -319,11 +318,31 @@ void setup() {
   // พัก Wi-Fi และ ESP-NOW ชั่วคราวเพื่อตัดตัวแปรคลื่น 2.4 GHz กวนเสียง
   // initWifiAndEspNow();
 
-  Serial.println(">> ESP32-S3 Preamp EQ Ready (Buffer Tuned, No loop delay) <<");
+  Serial.println(">> ESP32-S3 Preamp EQ Ready (ASRC Fix) <<");
 }
 
 void loop() {
   copier.copy();
+
+  // ===== ตัวแก้เสียงแก๊ก ASRC - ปรับเองอัตโนมัติ ไม่ต้องแฟลชใหม่ =====
+  static int asrcCount = 0;
+  static int currentRate = 44100;
+  if (++asrcCount > 100) {
+    asrcCount = 0;
+    int available = bufferedIn.available();
+
+    int targetRate = 44100;
+    if (available > 12000) {
+      targetRate = 44120; // น้ำเยอะ -> เร่งระบาย
+    } else if (available < 4000) {
+      targetRate = 44080; // น้ำน้อย -> ชะลอให้รอ
+    }
+
+    if (targetRate != currentRate) {
+      currentRate = targetRate;
+      i2s_set_sample_rates((i2s_port_t)1, targetRate);
+    }
+  }
 
   if (volDirty) {
     volDirty = false;
