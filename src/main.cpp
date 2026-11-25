@@ -44,7 +44,14 @@ volatile bool  logDirty           = false;
 volatile int   lastModeLog        = 0;
 volatile int   lastValLog         = 0;
 
-// --- คลาสฟิลเตอร์ EQ สเตอริโอ (แยกสถานะซ้าย L / ขวา R ขาดจากกัน) ---
+// ===== [ใหม่] ตัวแปรระบบเทถังทิ้งตอนเปลี่ยนเพลง =====
+unsigned long lastAudioTime = 0;
+bool gapMuted = false;
+float fadeVolume = 0.8f;
+unsigned long fadeStartTime = 0;
+bool isFadingUp = false;
+
+// --- ระบบสตรีมมิ่งพร้อมท่อ EQ แบบปรีแอมป์ (เริ่มต้น 0 dB ทุกย่าน) ---
 class StereoEqBand : public AudioEffect {
 public:
   enum BandType { LOW_SHELF, PEAKING, HIGH_SHELF };
@@ -310,6 +317,19 @@ void setupI2S() {
   copier.begin(i2sStreamOut, volumeControl);
 }
 
+// ===== [ใหม่] ฟังก์ชันเทถังทิ้ง =====
+void flushTank() {
+  uint8_t tmp[512];
+  while (bufferedIn.available() > 0) {
+    int n = bufferedIn.readBytes(tmp, sizeof(tmp));
+    if (n <= 0) break;
+  }
+  if (bassEq.activeInstance())   bassEq.activeInstance()->setGainDb(targetBassGainDb);
+  if (midEq.activeInstance())    midEq.activeInstance()->setGainDb(targetMidGainDb);
+  if (trebleEq.activeInstance()) trebleEq.activeInstance()->setGainDb(targetTrebleGainDb);
+  Serial.println(">> Flush Tank: เทน้ำเก่าทิ้งแล้ว <<");
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -318,11 +338,57 @@ void setup() {
   // พัก Wi-Fi และ ESP-NOW ชั่วคราวเพื่อตัดตัวแปรคลื่น 2.4 GHz กวนเสียง
   // initWifiAndEspNow();
 
-  Serial.println(">> ESP32-S3 Preamp EQ Ready (ASRC Fix) <<");
+  lastAudioTime = millis();
+  Serial.println(">> ESP32-S3 Preamp EQ Ready (ASRC + Flush Tank) <<");
 }
 
 void loop() {
-  copier.copy();
+  // ===== [ใหม่] 1. เช็คว่ามีเพลงมาไหม =====
+  int avail = bufferedIn.available();
+  unsigned long now = millis();
+
+  if (avail > 200) {
+    lastAudioTime = now;
+    if (gapMuted) {
+      gapMuted = false;
+      isFadingUp = true;
+      fadeStartTime = now;
+      fadeVolume = 0.0f;
+      volumeControl.setVolume(0.0f);
+      Serial.println(">> เพลงใหม่มาแล้ว เฟดขึ้น 30ms <<");
+    }
+  }
+
+  // ===== [ใหม่] 2. ไม่มีเพลงมาเกิน 100ms = เปลี่ยนเพลงแล้ว =====
+  if (!gapMuted && (now - lastAudioTime > 100)) {
+    volumeControl.setVolume(0.0f);
+    delay(10);
+    flushTank();
+    gapMuted = true;
+    isFadingUp = false;
+    Serial.println(">> ไม่มีเพลง 100ms เทถัง + Mute <<");
+  }
+
+  // ===== [ใหม่] 3. เฟดขึ้น 30ms ตอนเพลงใหม่มา =====
+  if (isFadingUp) {
+    unsigned long elapsed = now - fadeStartTime;
+    if (elapsed >= 30) {
+      fadeVolume = targetMuted ? 0.0f : targetVolume;
+      volumeControl.setVolume(fadeVolume);
+      isFadingUp = false;
+    } else {
+      float progress = (float)elapsed / 30.0f;
+      fadeVolume = (targetMuted ? 0.0f : targetVolume) * progress;
+      volumeControl.setVolume(fadeVolume);
+    }
+  }
+
+  // ===== [ใหม่] 4. ถ้ากำลัง Mute รอเพลงใหม่ ไม่ต้อง copy =====
+  if (!gapMuted) {
+    copier.copy();
+  } else {
+    delay(1);
+  }
 
   // ===== ตัวแก้เสียงแก๊ก ASRC - ปรับเองอัตโนมัติ ไม่ต้องแฟลชใหม่ =====
   static int asrcCount = 0;
@@ -346,10 +412,12 @@ void loop() {
 
   if (volDirty) {
     volDirty = false;
-    if (targetMuted) {
-      volumeControl.setVolume(0.0);
-    } else {
-      volumeControl.setVolume(targetVolume);
+    if (!gapMuted && !isFadingUp) {
+      if (targetMuted) {
+        volumeControl.setVolume(0.0);
+      } else {
+        volumeControl.setVolume(targetVolume);
+      }
     }
   }
 
