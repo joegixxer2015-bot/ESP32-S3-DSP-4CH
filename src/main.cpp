@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
+#include <Preferences.h>
 #include <math.h>
 #include "rom/gpio.h"
 #include "driver/gpio.h"
@@ -27,11 +28,12 @@ typedef struct struct_message {
 } struct_message;
 
 struct_message incomingData;
+Preferences prefs;
 
 // ตั้งค่ารูปแบบเสียงพื้นฐาน: 44.1kHz, Stereo, 16-bit
 AudioInfo info(44100, 2, 16);
 
-// ตัวแปรสถานะสำหรับรับค่าจาก ESP-NOW อย่างปลอดภัย
+// ตัวแปรสถานะสำหรับรับค่าจาก ESP-NOW และบันทึก NVS อย่างปลอดภัย
 volatile float targetBassGainDb   = 0.0f;
 volatile float targetMidGainDb    = 0.0f;
 volatile float targetTrebleGainDb = 0.0f;
@@ -40,18 +42,19 @@ volatile bool  targetMuted        = false;
 
 volatile bool  eqDirty            = false;
 volatile bool  volDirty           = false;
+volatile bool  nvsDirty           = false;
 volatile bool  logDirty           = false;
 volatile int   lastModeLog        = 0;
 volatile int   lastValLog         = 0;
 
-// ===== [ใหม่] ตัวแปรระบบเทถังทิ้งตอนเปลี่ยนเพลง =====
+// ===== ตัวแปรระบบเทถังทิ้งตอนเปลี่ยนเพลง =====
 unsigned long lastAudioTime = 0;
 bool gapMuted = false;
 float fadeVolume = 0.8f;
 unsigned long fadeStartTime = 0;
 bool isFadingUp = false;
 
-// --- ระบบสตรีมมิ่งพร้อมท่อ EQ แบบปรีแอมป์ (เริ่มต้น 0 dB ทุกย่าน) ---
+// --- คลาสฟิลเตอร์ EQ สเตอริโอ (แยกสถานะซ้าย L / ขวา R ขาดจากกัน) ---
 class StereoEqBand : public AudioEffect {
 public:
   enum BandType { LOW_SHELF, PEAKING, HIGH_SHELF };
@@ -178,7 +181,7 @@ private:
   StereoEqBand* liveInstance_ = nullptr;
 };
 
-// --- ระบบสตรีมมิ่งพร้อมท่อ EQ แบบปรีแอมป์ (เริ่มต้น 0 dB ทุกย่าน) ---
+// --- ระบบสตรีมมิ่งพร้อมท่อ EQ แบบปรีแอมป์ ---
 I2SStream i2sStreamIn;
 I2SStream i2sStreamOut;
 
@@ -193,6 +196,35 @@ VolumeStream volumeControl(eqStream);
 StreamCopy copier(i2sStreamOut, volumeControl);
 
 unsigned long lastKeepAliveCheck = 0;
+
+// --- ฟังก์ชันโหลดและบันทึกค่าลง NVS ---
+void loadSettingsFromNVS() {
+  prefs.begin("preamp_cfg", true); // true = read-only mode
+  targetVolume       = constrain(prefs.getFloat("vol", 0.8f), 0.0f, 1.0f);
+  targetBassGainDb   = constrain(prefs.getFloat("bass", 0.0f), -15.0f, 15.0f);
+  targetMidGainDb    = constrain(prefs.getFloat("mid", 0.0f), -12.0f, 12.0f);
+  targetTrebleGainDb = constrain(prefs.getFloat("treble", 0.0f), -12.0f, 12.0f);
+  targetMuted        = prefs.getBool("muted", false);
+  prefs.end();
+
+  fadeVolume = targetMuted ? 0.0f : targetVolume;
+
+  Serial.printf(">> NVS Loaded: Vol=%.2f, Bass=%.1f, Mid=%.1f, Treble=%.1f, Mute=%d <<\n",
+                targetVolume, targetBassGainDb, targetMidGainDb, targetTrebleGainDb, targetMuted ? 1 : 0);
+}
+
+void saveSettingsToNVS() {
+  prefs.begin("preamp_cfg", false); // false = read/write mode
+  prefs.putFloat("vol", targetVolume);
+  prefs.putFloat("bass", targetBassGainDb);
+  prefs.putFloat("mid", targetMidGainDb);
+  prefs.putFloat("treble", targetTrebleGainDb);
+  prefs.putBool("muted", targetMuted);
+  prefs.end();
+
+  Serial.printf(">> NVS Saved: Vol=%.2f, Bass=%.1f, Mid=%.1f, Treble=%.1f, Mute=%d <<\n",
+                targetVolume, targetBassGainDb, targetMidGainDb, targetTrebleGainDb, targetMuted ? 1 : 0);
+}
 
 void applyEqGains() {
   if (bassEq.activeInstance())   bassEq.activeInstance()->setGainDb(targetBassGainDb);
@@ -217,29 +249,46 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingDataPtr, int le
   if (incomingData.isMuted != targetMuted) {
     targetMuted = incomingData.isMuted;
     volDirty = true;
+    nvsDirty = true;
   }
 
   if (incomingData.isMuted) return;
 
   switch (safeMode) {
     case 0: {
-      targetVolume = constrain((float)incomingData.value / 100.0f, 0.0f, 1.0f);
-      volDirty = true;
+      float newVol = constrain((float)incomingData.value / 100.0f, 0.0f, 1.0f);
+      if (fabsf(newVol - targetVolume) > 0.001f) {
+        targetVolume = newVol;
+        volDirty = true;
+        nvsDirty = true;
+      }
       break;
     }
     case 1: {
-      targetBassGainDb = constrain((float)incomingData.value, -15.0f, 15.0f);
-      eqDirty = true;
+      float newBass = constrain((float)incomingData.value, -15.0f, 15.0f);
+      if (fabsf(newBass - targetBassGainDb) > 0.01f) {
+        targetBassGainDb = newBass;
+        eqDirty = true;
+        nvsDirty = true;
+      }
       break;
     }
     case 2: {
-      targetMidGainDb = constrain((float)incomingData.value, -12.0f, 12.0f);
-      eqDirty = true;
+      float newMid = constrain((float)incomingData.value, -12.0f, 12.0f);
+      if (fabsf(newMid - targetMidGainDb) > 0.01f) {
+        targetMidGainDb = newMid;
+        eqDirty = true;
+        nvsDirty = true;
+      }
       break;
     }
     case 3: {
-      targetTrebleGainDb = constrain((float)incomingData.value, -12.0f, 12.0f);
-      eqDirty = true;
+      float newTreble = constrain((float)incomingData.value, -12.0f, 12.0f);
+      if (fabsf(newTreble - targetTrebleGainDb) > 0.01f) {
+        targetTrebleGainDb = newTreble;
+        eqDirty = true;
+        nvsDirty = true;
+      }
       break;
     }
   }
@@ -312,21 +361,19 @@ void setupI2S() {
   auto vconfig = volumeControl.defaultConfig();
   vconfig.copyFrom(info);
   volumeControl.begin(vconfig);
-  volumeControl.setVolume(targetVolume);
+  volumeControl.setVolume(targetMuted ? 0.0f : targetVolume);
 
   copier.begin(i2sStreamOut, volumeControl);
 }
 
-// ===== [ใหม่] ฟังก์ชันเทถังทิ้ง =====
+// ===== ฟังก์ชันเทถังทิ้ง =====
 void flushTank() {
   uint8_t tmp[512];
   while (bufferedIn.available() > 0) {
     int n = bufferedIn.readBytes(tmp, sizeof(tmp));
     if (n <= 0) break;
   }
-  if (bassEq.activeInstance())   bassEq.activeInstance()->setGainDb(targetBassGainDb);
-  if (midEq.activeInstance())    midEq.activeInstance()->setGainDb(targetMidGainDb);
-  if (trebleEq.activeInstance()) trebleEq.activeInstance()->setGainDb(targetTrebleGainDb);
+  applyEqGains();
   Serial.println(">> Flush Tank: เทน้ำเก่าทิ้งแล้ว <<");
 }
 
@@ -334,16 +381,16 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
 
+  loadSettingsFromNVS();
   setupI2S();
-  // พัก Wi-Fi และ ESP-NOW ชั่วคราวเพื่อตัดตัวแปรคลื่น 2.4 GHz กวนเสียง
-  // initWifiAndEspNow();
+  initWifiAndEspNow();
 
   lastAudioTime = millis();
-  Serial.println(">> ESP32-S3 Preamp EQ Ready (ASRC + Flush Tank) <<");
+  Serial.println(">> ESP32-S3 Preamp EQ Ready (ESP-NOW + NVS + ASRC + Flush Tank) <<");
 }
 
 void loop() {
-  // ===== [ใหม่] 1. เช็คว่ามีเพลงมาไหม =====
+  // ===== 1. เช็คว่ามีเพลงมาไหม =====
   int avail = bufferedIn.available();
   unsigned long now = millis();
 
@@ -359,7 +406,7 @@ void loop() {
     }
   }
 
-  // ===== [ใหม่] 2. ไม่มีเพลงมาเกิน 100ms = เปลี่ยนเพลงแล้ว =====
+  // ===== 2. ไม่มีเพลงมาเกิน 100ms = เปลี่ยนเพลงแล้ว =====
   if (!gapMuted && (now - lastAudioTime > 100)) {
     volumeControl.setVolume(0.0f);
     delay(10);
@@ -369,7 +416,7 @@ void loop() {
     Serial.println(">> ไม่มีเพลง 100ms เทถัง + Mute <<");
   }
 
-  // ===== [ใหม่] 3. เฟดขึ้น 30ms ตอนเพลงใหม่มา =====
+  // ===== 3. เฟดขึ้น 30ms ตอนเพลงใหม่มา =====
   if (isFadingUp) {
     unsigned long elapsed = now - fadeStartTime;
     if (elapsed >= 30) {
@@ -383,14 +430,14 @@ void loop() {
     }
   }
 
-  // ===== [ใหม่] 4. ถ้ากำลัง Mute รอเพลงใหม่ ไม่ต้อง copy =====
+  // ===== 4. ถ้ากำลัง Mute รอเพลงใหม่ ไม่ต้อง copy =====
   if (!gapMuted) {
     copier.copy();
   } else {
     delay(1);
   }
 
-  // ===== ตัวแก้เสียงแก๊ก ASRC - ปรับเองอัตโนมัติ ไม่ต้องแฟลชใหม่ =====
+  // ===== ตัวแก้เสียงแก๊ก ASRC - ปรับเองอัตโนมัติ =====
   static int asrcCount = 0;
   static int currentRate = 44100;
   if (++asrcCount > 100) {
@@ -413,16 +460,25 @@ void loop() {
   if (volDirty) {
     volDirty = false;
     if (!gapMuted && !isFadingUp) {
-      if (targetMuted) {
-        volumeControl.setVolume(0.0);
-      } else {
-        volumeControl.setVolume(targetVolume);
-      }
+      volumeControl.setVolume(targetMuted ? 0.0f : targetVolume);
     }
   }
 
   if (eqDirty) {
     eqDirty = false;
     applyEqGains();
+  }
+
+  // บันทึกลง NVS แบบหน่วงนิ่ง ~250ms หลังขยับปุ่ม เพื่อไม่ให้เขียนซ้ำถี่เกินไปตอนหมุน/ลากค่า
+  static unsigned long lastNvsChangeTime = 0;
+  static bool pendingNvsSave = false;
+  if (nvsDirty) {
+    nvsDirty = false;
+    lastNvsChangeTime = now;
+    pendingNvsSave = true;
+  }
+  if (pendingNvsSave && (now - lastNvsChangeTime >= 4500)) {
+    pendingNvsSave = false;
+    saveSettingsToNVS();
   }
 }
