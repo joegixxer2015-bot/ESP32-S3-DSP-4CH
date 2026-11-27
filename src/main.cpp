@@ -20,6 +20,10 @@ Preferences prefs;
 WebServer server(80);
 typedef struct{int controlMode;int value;bool isMuted;} Msg;
 Msg incomingData;
+// --- AP AUTO-OFF ---
+bool apActive=true;
+unsigned long apLastSeen=0;
+const unsigned long AP_TIMEOUT=120000; // 2 นาที
 class Biquad{
 public:
 enum Type{PEAKING,LOW_SHELF,HIGH_SHELF,LOW_PASS,HIGH_PASS};
@@ -91,7 +95,19 @@ Serial.printf("ESP-NOW AFTER vol=%.2f bass=%.1f mid=%.1f treble=%.1f muted=%d\n"
 void initWifiAndEspNow(){
 WiFi.persistent(false);WiFi.mode(WIFI_AP_STA);WiFi.softAP("DSP-TUNER","12345678",1);WiFi.disconnect();
 esp_wifi_set_promiscuous(true);esp_wifi_set_channel(1,WIFI_SECOND_CHAN_NONE);esp_wifi_set_promiscuous(false);
-if(esp_now_init()==ESP_OK){esp_now_register_recv_cb(OnDataRecv);Serial.println("ESP-NOW Ready Ch1");}else Serial.println("ESP-NOW Fail");}
+if(esp_now_init()==ESP_OK){esp_now_register_recv_cb(OnDataRecv);Serial.println("ESP-NOW Ready Ch1");}else Serial.println("ESP-NOW Fail");
+apActive=true;apLastSeen=millis();Serial.println("AP ON - 5 min timeout if no client");}
+void checkApTimeout(){
+if(!apActive)return;
+unsigned long now=millis();
+int clients=WiFi.softAPgetStationNum();
+if(clients>0){apLastSeen=now;return;}
+if(now-apLastSeen>=AP_TIMEOUT){
+WiFi.softAPdisconnect(true);
+apActive=false;
+esp_wifi_set_promiscuous(true);esp_wifi_set_channel(1,WIFI_SECOND_CHAN_NONE);esp_wifi_set_promiscuous(false);
+Serial.println("AP OFF - no client 5 min, restart S3 to enable again. ESP-NOW still works.");
+}}
 const char* HTML_PAGE = R"HTML(
 <!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DSP TUNER</title><style>*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:#fff;color:#111;padding:16px;max-width:480px;margin:auto}h1{text-align:center;font-size:28px;margin:8px 0 16px}.label{font-weight:bold;margin:12px 0 6px}.box{background:#e8e8e8;border-radius:10px;padding:12px;margin-bottom:12px}.row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:8px 0}.row label{flex:1}.row input{width:90px;padding:8px;font-size:16px}.btn{padding:10px 14px;border:1px solid #ccc;background:#fff;border-radius:8px;font-size:16px;cursor:pointer}.btn.sel{background:#111;color:#fff}.btn-green{background:#22c55e;color:#fff;border-color:#22c55e}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.full{width:100%;padding:12px;font-size:18px;border-radius:10px}</style></head><body><h1>DSP TUNER</h1><div class="label">CROSSOVER</div><div class="box"><b>CHANNEL A</b><div class="row"><label>Filter 1 Hi-Pass</label><input id="a_hp" type="number" value="30"><span>Hz</span></div><div class="row"><label>Filter 2 Low-Pass</label><input id="a_lp" type="number" value="500"><span>Hz</span></div><div class="row"><label>Delay</label><input id="a_dly" type="number" step="0.01" value="0"><span>ms</span></div><div class="row"><label>Mode</label><button class="btn" onclick="setMode('A','STEREO',this)">STEREO</button><button class="btn sel" onclick="setMode('A','MONO',this)">MONO</button></div></div><div class="box"><b>CHANNEL B</b><div class="row"><label>Filter 1 Hi-Pass</label><input id="b_hp" type="number" value="500"><span>Hz</span></div><div class="row"><label>Filter 2 Low-Pass</label><input id="b_lp" type="number" value="20000"><span>Hz</span></div><div class="row"><label>Delay</label><input id="b_dly" type="number" step="0.01" value="0.15"><span>ms</span></div><div class="row"><label>Mode</label><button class="btn sel" onclick="setMode('B','STEREO',this)">STEREO</button><button class="btn" onclick="setMode('B','MONO',this)">MONO</button></div></div><button class="btn full" onclick="applyCrossover()">APPLY</button><div class="label">EQ - 5 BANDS</div><div class="box"><div class="row"><label>60 Hz</label><input id="eq0" type="number" value="0"><span>dB</span></div><div class="row"><label>250 Hz</label><input id="eq1" type="number" value="0"><span>dB</span></div><div class="row"><label>1 kHz</label><input id="eq2" type="number" value="0"><span>dB</span></div><div class="row"><label>4 kHz</label><input id="eq3" type="number" value="0"><span>dB</span></div><div class="row"><label>10 kHz</label><input id="eq4" type="number" value="0"><span>dB</span></div></div><div class="label">USER PRESET</div><div class="grid"><button class="btn" onclick="loadUser(1,this)">USER 1</button><button class="btn" onclick="loadUser(2,this)">USER 2</button><button class="btn" onclick="loadUser(3,this)">USER 3</button><button class="btn" onclick="loadUser(4,this)">USER 4</button></div><br><div style="display:flex;gap:10px"><button class="btn full" onclick="doDefault()">DEFAULT</button><button class="btn full btn-green" onclick="doSave()">SAVE</button></div><p id="msg" style="text-align:center"></p><script>let modeA='MONO',modeB='STEREO',selUser=1;document.querySelectorAll('input[type=number]').forEach(el=>{el.addEventListener('focus',()=>el.select());el.addEventListener('blur',()=>{if(el.value==='')el.value='0';});});function setMode(ch,m,btn){if(ch==='A')modeA=m;else modeB=m;btn.parentElement.querySelectorAll('.btn').forEach(b=>b.classList.remove('sel'));btn.classList.add('sel');}function collect(){return{a_hp:+document.getElementById('a_hp').value,a_lp:+document.getElementById('a_lp').value,a_dly:+document.getElementById('a_dly').value,b_hp:+document.getElementById('b_hp').value,b_lp:+document.getElementById('b_lp').value,b_dly:+document.getElementById('b_dly').value,eq:[+document.getElementById('eq0').value,+document.getElementById('eq1').value,+document.getElementById('eq2').value,+document.getElementById('eq3').value,+document.getElementById('eq4').value],modeA,modeB,user:selUser};}async function applyCrossover(){let d=collect();let r=await fetch('/api/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});document.getElementById('msg').textContent=await r.text();}async function doSave(){let d=collect();let r=await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});document.getElementById('msg').textContent=await r.text();}async function doDefault(){let r=await fetch('/api/default',{method:'POST'});document.getElementById('msg').textContent=await r.text();location.reload();}async function loadUser(n,btn){selUser=n;document.querySelectorAll('.grid .btn').forEach(b=>b.classList.remove('sel'));btn.classList.add('sel');let r=await fetch('/api/load?user='+n);let j=await r.json();document.getElementById('a_hp').value=j.a_hp;document.getElementById('a_lp').value=j.a_lp;document.getElementById('b_hp').value=j.b_hp;document.getElementById('b_lp').value=j.b_lp;document.getElementById('eq0').value=j.eq[0];document.getElementById('eq1').value=j.eq[1];document.getElementById('eq2').value=j.eq[2];document.getElementById('eq3').value=j.eq[3];document.getElementById('eq4').value=j.eq[4];}</script></body></html>
 )HTML";
@@ -133,7 +149,7 @@ s[i*2]=(int16_t)l;s[i*2+1]=(int16_t)r;}
 i2sStreamOut.write(buf,read);}
 void setup(){Serial.begin(115200);delay(1000);setDefaultPreset();loadSettings();setupI2S();updateAllCoeffs();initWifiAndEspNow();setupWeb();lastAudioTime=millis();Serial.println("S3 DSP Ready");}
 void loop(){
-server.handleClient();int avail=i2sStreamIn.available();unsigned long now=millis();
+server.handleClient();checkApTimeout();int avail=i2sStreamIn.available();unsigned long now=millis();
 if(avail>200){lastAudioTime=now;if(gapMuted){gapMuted=false;isFadingUp=true;fadeStartTime=now;fadeVolume=0;}}
 if(!gapMuted&&(now-lastAudioTime>100)){delay(10);flushTank();gapMuted=true;isFadingUp=false;}
 if(isFadingUp){unsigned long el=now-fadeStartTime;if(el>=30){fadeVolume=targetMuted?0:targetVolume;isFadingUp=false;}else{float p=(float)el/30.0f;fadeVolume=(targetMuted?0:targetVolume)*p;}}
