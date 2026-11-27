@@ -47,9 +47,25 @@ unsigned long lastNvsChange=0;bool pendingNvs=false;
 #define DELAY_LEN 200
 float delayBufA_L[DELAY_LEN]={0},delayBufA_R[DELAY_LEN]={0},delayBufB_L[DELAY_LEN]={0},delayBufB_R[DELAY_LEN]={0};
 int delayIdxA=0,delayIdxB=0;
-float applyDelay(float *buf,int &idx,float x,float delayMs){int ds=(int)(delayMs*44.1f);if(ds<=0)return x;if(ds>=DELAY_LEN)ds=DELAY_LEN-1;int r=(idx-ds+DELAY_LEN)%DELAY_LEN;float y=buf[r];buf[idx]=x;idx=(idx+1)%DELAY_LEN;return y;}
+class DspEffect : public AudioEffect{
+public:
+bool begin(AudioInfo info) override { setAudioInfo(info); return true; }
+size_t process(uint8_t *data, size_t len) override {
+int16_t *s=(int16_t*)data; int frames=len/4;
+for(int i=0;i<frames;i++){
+float l=s[i*2]; float r=s[i*2+1];
+for(int k=0;k<5;k++) webEQ[k].process(l,r);
+for(int k=0;k<3;k++) remoteEQ[k].process(l,r);
+if(l>32767)l=32767; if(l<-32768)l=-32768; if(r>32767)r=32767; if(r<-32768)r=-32768;
+s[i*2]=(int16_t)l; s[i*2+1]=(int16_t)r;
+}
+return len;
+}
+void end() override {}
+};
+DspEffect dspEffect;
 I2SStream i2sStreamIn; I2SStream i2sStreamOut; BufferedStream bufferedIn(i2sStreamIn,16384);
-VolumeStream volumeControl(bufferedIn); StreamCopy copier(i2sStreamOut,volumeControl);
+AudioEffectStream eqStream(bufferedIn); VolumeStream volumeControl(eqStream); StreamCopy copier(i2sStreamOut,volumeControl);
 unsigned long lastAudioTime=0;bool gapMuted=false;float fadeVolume=0.8f;unsigned long fadeStartTime=0;bool isFadingUp=false;
 void setDefaultPreset(){
 for(int i=0;i<5;i++)defaultPreset.webEQ[i]=0;
@@ -119,8 +135,9 @@ server.begin();Serial.println("Web: http://192.168.4.1/ SSID DSP-TUNER");}
 void setupI2S(){
 auto configIn=i2sStreamIn.defaultConfig(RX_MODE);configIn.copyFrom(info);configIn.rx_tx_mode=RX_MODE;configIn.port_no=0;configIn.pin_bck=I2S_IN_BCK;configIn.pin_ws=I2S_IN_LRCK;configIn.pin_data=I2S_IN_DATA;configIn.is_master=false;configIn.buffer_count=16;configIn.buffer_size=512;i2sStreamIn.begin(configIn);bufferedIn.begin();
 auto configOut=i2sStreamOut.defaultConfig(TX_MODE);configOut.copyFrom(info);configOut.rx_tx_mode=TX_MODE;configOut.port_no=1;configOut.pin_bck=I2S_BCK_PIN;configOut.pin_ws=I2S_LRCK_PIN;configOut.pin_data=I2S_DATA1_PIN;configOut.buffer_count=12;configOut.buffer_size=512;i2sStreamOut.begin(configOut);
-//gpio_matrix_out(I2S_DATA2_PIN,i2s_periph_signal[I2S_NUM_1].data_out_sig,false,false);
-auto vconfig=volumeControl.defaultConfig();vconfig.copyFrom(info);volumeControl.begin(vconfig);volumeControl.setVolume(targetMuted?0:targetVolume);copier.begin(i2sStreamOut,volumeControl);}
+auto vconfig=volumeControl.defaultConfig();vconfig.copyFrom(info);
+auto econfig=eqStream.defaultConfig();econfig.copyFrom(info);eqStream.begin(econfig);eqStream.addEffect(dspEffect);
+volumeControl.begin(vconfig);volumeControl.setVolume(targetMuted?0:targetVolume);copier.begin(i2sStreamOut,volumeControl);}
 void flushTank(){uint8_t tmp[512];while(bufferedIn.available()>0){int n=bufferedIn.readBytes(tmp,sizeof(tmp));if(n<=0)break;}Serial.println("Flush Tank");}
 void setup(){Serial.begin(115200);delay(1000);setDefaultPreset();loadSettings();setupI2S();updateAllCoeffs();initWifiAndEspNow();setupWeb();lastAudioTime=millis();Serial.println("S3 DSP Ready");}
 void loop(){
