@@ -49,7 +49,7 @@ float delayBufA_L[DELAY_LEN]={0},delayBufA_R[DELAY_LEN]={0},delayBufB_L[DELAY_LE
 int delayIdxA=0,delayIdxB=0;
 float applyDelay(float *buf,int &idx,float x,float delayMs){int ds=(int)(delayMs*44.1f);if(ds<=0)return x;if(ds>=DELAY_LEN)ds=DELAY_LEN-1;int r=(idx-ds+DELAY_LEN)%DELAY_LEN;float y=buf[r];buf[idx]=x;idx=(idx+1)%DELAY_LEN;return y;}
 I2SStream i2sStreamIn; I2SStream i2sStreamOut; BufferedStream bufferedIn(i2sStreamIn,16384);
-AudioEffectStream eqStream(bufferedIn); VolumeStream volumeControl(eqStream); StreamCopy copier(i2sStreamOut,volumeControl);
+VolumeStream volumeControl(bufferedIn); StreamCopy copier(i2sStreamOut,volumeControl);
 unsigned long lastAudioTime=0;bool gapMuted=false;float fadeVolume=0.8f;unsigned long fadeStartTime=0;bool isFadingUp=false;
 void setDefaultPreset(){
 for(int i=0;i<5;i++)defaultPreset.webEQ[i]=0;
@@ -119,7 +119,7 @@ server.begin();Serial.println("Web: http://192.168.4.1/ SSID DSP-TUNER");}
 void setupI2S(){
 auto configIn=i2sStreamIn.defaultConfig(RX_MODE);configIn.copyFrom(info);configIn.rx_tx_mode=RX_MODE;configIn.port_no=0;configIn.pin_bck=I2S_IN_BCK;configIn.pin_ws=I2S_IN_LRCK;configIn.pin_data=I2S_IN_DATA;configIn.is_master=false;configIn.buffer_count=16;configIn.buffer_size=512;i2sStreamIn.begin(configIn);bufferedIn.begin();
 auto configOut=i2sStreamOut.defaultConfig(TX_MODE);configOut.copyFrom(info);configOut.rx_tx_mode=TX_MODE;configOut.port_no=1;configOut.pin_bck=I2S_BCK_PIN;configOut.pin_ws=I2S_LRCK_PIN;configOut.pin_data=I2S_DATA1_PIN;configOut.buffer_count=12;configOut.buffer_size=512;i2sStreamOut.begin(configOut);
-gpio_matrix_out(I2S_DATA2_PIN,i2s_periph_signal[I2S_NUM_1].data_out_sig,false,false);
+//gpio_matrix_out(I2S_DATA2_PIN,i2s_periph_signal[I2S_NUM_1].data_out_sig,false,false);
 auto vconfig=volumeControl.defaultConfig();vconfig.copyFrom(info);volumeControl.begin(vconfig);volumeControl.setVolume(targetMuted?0:targetVolume);copier.begin(i2sStreamOut,volumeControl);}
 void flushTank(){uint8_t tmp[512];while(bufferedIn.available()>0){int n=bufferedIn.readBytes(tmp,sizeof(tmp));if(n<=0)break;}Serial.println("Flush Tank");}
 void setup(){Serial.begin(115200);delay(1000);setDefaultPreset();loadSettings();setupI2S();updateAllCoeffs();initWifiAndEspNow();setupWeb();lastAudioTime=millis();Serial.println("S3 DSP Ready");}
