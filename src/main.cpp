@@ -1,484 +1,141 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WebServer.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <Preferences.h>
 #include <math.h>
-#include "rom/gpio.h"
 #include "driver/gpio.h"
 #include "driver/i2s.h"
 #include "AudioTools.h"
-
-// --- พินฝั่งขาออก (Output ไปยัง DAC PCM5102A) ---
-#define I2S_BCK_PIN   15
-#define I2S_LRCK_PIN  16
+void setDefaultPreset();void updateAllCoeffs();void applyAll();void loadSettings();void saveSettings();void saveUserPreset(int);void loadUserPreset(int);void initWifiAndEspNow();void setupWeb();void setupI2S();void flushTank();
+#define I2S_BCK_PIN 15
+#define I2S_LRCK_PIN 16
 #define I2S_DATA1_PIN 17
-#define I2S_DATA2_PIN 18   // ขาพ่วงข้อมูลเสริม (ถ้ามี)
-
-// --- พินฝั่งขาเข้า (Input รับจาก ESP32 DevKit V1) ---
-#define I2S_IN_BCK    4
-#define I2S_IN_LRCK   5
-#define I2S_IN_DATA   6
-
-// โครงสร้างข้อมูลคำสั่งจากรีโมท (ESP-NOW)
-typedef struct struct_message {
-    int controlMode;
-    int value;
-    bool isMuted;
-} struct_message;
-
-struct_message incomingData;
+#define I2S_DATA2_PIN 18
+#define I2S_IN_BCK 4
+#define I2S_IN_LRCK 5
+#define I2S_IN_DATA 6
+AudioInfo info(44100,2,16);
 Preferences prefs;
-
-// ตั้งค่ารูปแบบเสียงพื้นฐาน: 44.1kHz, Stereo, 16-bit
-AudioInfo info(44100, 2, 16);
-
-// ตัวแปรสถานะสำหรับรับค่าจาก ESP-NOW และบันทึก NVS อย่างปลอดภัย
-volatile float targetBassGainDb   = 0.0f;
-volatile float targetMidGainDb    = 0.0f;
-volatile float targetTrebleGainDb = 0.0f;
-volatile float targetVolume       = 0.8f;
-volatile bool  targetMuted        = false;
-
-volatile bool  eqDirty            = false;
-volatile bool  volDirty           = false;
-volatile bool  nvsDirty           = false;
-volatile bool  logDirty           = false;
-volatile int   lastModeLog        = 0;
-volatile int   lastValLog         = 0;
-
-// ===== ตัวแปรระบบเทถังทิ้งตอนเปลี่ยนเพลง =====
-unsigned long lastAudioTime = 0;
-bool gapMuted = false;
-float fadeVolume = 0.8f;
-unsigned long fadeStartTime = 0;
-bool isFadingUp = false;
-
-// --- คลาสฟิลเตอร์ EQ สเตอริโอ (แยกสถานะซ้าย L / ขวา R ขาดจากกัน) ---
-class StereoEqBand : public AudioEffect {
+WebServer server(80);
+typedef struct{int controlMode;int value;bool isMuted;} Msg;
+Msg incomingData;
+class Biquad{
 public:
-  enum BandType { LOW_SHELF, PEAKING, HIGH_SHELF };
-
-  StereoEqBand(BandType type, float freq, float sampleRate, float q = 0.8f)
-      : type_(type), freq_(freq), sampleRate_(sampleRate), q_(q) {
-    setGainDb(0.0f);
-    liveInstance_ = this;
-  }
-
-  StereoEqBand(const StereoEqBand& other) = default;
-
-  AudioEffect* clone() override {
-    StereoEqBand* copy = new StereoEqBand(*this);
-    resetState(copy);
-    liveInstance_ = copy;
-    return copy;
-  }
-
-  StereoEqBand* activeInstance() {
-    return liveInstance_ ? liveInstance_ : this;
-  }
-
-  void setGainDb(float db) {
-    gainDb_ = db;
-    updateCoeffs();
-  }
-
-  float getGainDb() const {
-    return gainDb_;
-  }
-
-  effect_t process(effect_t input) override {
-    if (!active() || fabsf(gainDb_) < 0.05f) {
-      isLeftSample_ = !isLeftSample_;
-      return input;
-    }
-
-    float x = (float)input;
-    float y;
-
-    if (!isLeftSample_) {
-      y = b0_ * x + b1_ * x1L_ + b2_ * x2L_ - a1_ * y1L_ - a2_ * y2L_;
-      x2L_ = x1L_;
-      x1L_ = x;
-      y2L_ = y1L_;
-      y1L_ = y;
-    } else {
-      y = b0_ * x + b1_ * x1R_ + b2_ * x2R_ - a1_ * y1R_ - a2_ * y2R_;
-      x2R_ = x1R_;
-      x1R_ = x;
-      y2R_ = y1R_;
-      y1R_ = y;
-    }
-
-    isLeftSample_ = !isLeftSample_;
-
-    if (y > 32767.0f) y = 32767.0f;
-    if (y < -32768.0f) y = -32768.0f;
-    return (effect_t)y;
-  }
-
-private:
-  static void resetState(StereoEqBand* band) {
-    band->isLeftSample_ = false;
-    band->x1L_ = band->x2L_ = band->y1L_ = band->y2L_ = 0.0f;
-    band->x1R_ = band->x2R_ = band->y1R_ = band->y2R_ = 0.0f;
-  }
-
-  void updateCoeffs() {
-    float A = powf(10.0f, gainDb_ / 40.0f);
-    float omega = 2.0f * (float)M_PI * freq_ / sampleRate_;
-    float sn = sinf(omega);
-    float cs = cosf(omega);
-    float alpha = sn / (2.0f * q_);
-
-    float b0 = 1.0f, b1 = 0.0f, b2 = 0.0f, a0 = 1.0f, a1 = 0.0f, a2 = 0.0f;
-
-    if (type_ == LOW_SHELF) {
-      float twoSqrtAAlpha = 2.0f * sqrtf(A) * alpha;
-      b0 = A * ((A + 1.0f) - (A - 1.0f) * cs + twoSqrtAAlpha);
-      b1 = 2.0f * A * ((A - 1.0f) - (A + 1.0f) * cs);
-      b2 = A * ((A + 1.0f) - (A - 1.0f) * cs - twoSqrtAAlpha);
-      a0 = (A + 1.0f) + (A - 1.0f) * cs + twoSqrtAAlpha;
-      a1 = -2.0f * ((A - 1.0f) + (A + 1.0f) * cs);
-      a2 = (A + 1.0f) + (A - 1.0f) * cs - twoSqrtAAlpha;
-    } else if (type_ == HIGH_SHELF) {
-      float twoSqrtAAlpha = 2.0f * sqrtf(A) * alpha;
-      b0 = A * ((A + 1.0f) + (A - 1.0f) * cs + twoSqrtAAlpha);
-      b1 = -2.0f * A * ((A - 1.0f) + (A + 1.0f) * cs);
-      b2 = A * ((A + 1.0f) + (A - 1.0f) * cs - twoSqrtAAlpha);
-      a0 = (A + 1.0f) - (A - 1.0f) * cs + twoSqrtAAlpha;
-      a1 = 2.0f * ((A - 1.0f) - (A + 1.0f) * cs);
-      a2 = (A + 1.0f) - (A - 1.0f) * cs - twoSqrtAAlpha;
-    } else {
-      b0 = 1.0f + alpha * A;
-      b1 = -2.0f * cs;
-      b2 = 1.0f - alpha * A;
-      a0 = 1.0f + alpha / A;
-      a1 = -2.0f * cs;
-      a2 = 1.0f - alpha / A;
-    }
-
-    float invA0 = 1.0f / a0;
-    b0_ = b0 * invA0;
-    b1_ = b1 * invA0;
-    b2_ = b2 * invA0;
-    a1_ = a1 * invA0;
-    a2_ = a2 * invA0;
-  }
-
-  BandType type_;
-  float freq_;
-  float sampleRate_;
-  float q_;
-  float gainDb_ = 0.0f;
-
-  float b0_ = 1.0f, b1_ = 0.0f, b2_ = 0.0f, a1_ = 0.0f, a2_ = 0.0f;
-
-  bool isLeftSample_ = false;
-  float x1L_ = 0.0f, x2L_ = 0.0f, y1L_ = 0.0f, y2L_ = 0.0f;
-  float x1R_ = 0.0f, x2R_ = 0.0f, y1R_ = 0.0f, y2R_ = 0.0f;
-
-  StereoEqBand* liveInstance_ = nullptr;
+enum Type{PEAKING,LOW_SHELF,HIGH_SHELF,LOW_PASS,HIGH_PASS};
+void set(Type t,float freq,float q,float gainDb,float sr){
+float A=powf(10.0f,gainDb/40.0f);float w=2.0f*(float)M_PI*freq/sr;float sn=sinf(w),cs=cosf(w);float alpha=sn/(2.0f*q);
+float b0_,b1_,b2_,a0_,a1_,a2_;
+if(t==LOW_PASS){b0_=(1-cs)/2;b1_=1-cs;b2_=(1-cs)/2;a0_=1+alpha;a1_=-2*cs;a2_=1-alpha;}
+else if(t==HIGH_PASS){b0_=(1+cs)/2;b1_=-(1+cs);b2_=(1+cs)/2;a0_=1+alpha;a1_=-2*cs;a2_=1-alpha;}
+else if(t==PEAKING){b0_=1+alpha*A;b1_=-2*cs;b2_=1-alpha*A;a0_=1+alpha/A;a1_=-2*cs;a2_=1-alpha/A;}
+else if(t==LOW_SHELF){float sA=2*sqrtf(A)*alpha;b0_=A*((A+1)-(A-1)*cs+sA);b1_=2*A*((A-1)-(A+1)*cs);b2_=A*((A+1)-(A-1)*cs-sA);a0_=(A+1)+(A-1)*cs+sA;a1_=-2*((A-1)+(A+1)*cs);a2_=(A+1)-(A-1)*cs-sA;}
+else{float sA=2*sqrtf(A)*alpha;b0_=A*((A+1)+(A-1)*cs+sA);b1_=-2*A*((A-1)+(A+1)*cs);b2_=A*((A+1)+(A-1)*cs-sA);a0_=(A+1)-(A-1)*cs+sA;a1_=2*((A-1)-(A+1)*cs);a2_=(A+1)-(A-1)*cs-sA;}
+float inv=1.0f/a0_;b0=b0_*inv;b1=b1_*inv;b2=b2_*inv;a1=a1_*inv;a2=a2_*inv;}
+float process(float x){float y=b0*x+b1*x1+b2*x2-a1*y1-a2*y2;x2=x1;x1=x;y2=y1;y1=y;if(y>32767)y=32767;if(y<-32768)y=-32768;return y;}
+void reset(){x1=x2=y1=y2=0;}
+private:float b0=1,b1=0,b2=0,a1=0,a2=0,x1=0,x2=0,y1=0,y2=0;
 };
-
-// --- ระบบสตรีมมิ่งพร้อมท่อ EQ แบบปรีแอมป์ ---
-I2SStream i2sStreamIn;
-I2SStream i2sStreamOut;
-
-BufferedStream bufferedIn(i2sStreamIn, 16384);
-AudioEffectStream eqStream(bufferedIn);
-
-StereoEqBand bassEq(StereoEqBand::LOW_SHELF, 125.0f, (float)info.sample_rate, 0.7f);
-StereoEqBand midEq(StereoEqBand::PEAKING, 1000.0f, (float)info.sample_rate, 0.9f);
-StereoEqBand trebleEq(StereoEqBand::HIGH_SHELF, 6500.0f, (float)info.sample_rate, 0.75f);
-
-VolumeStream volumeControl(eqStream);
-StreamCopy copier(i2sStreamOut, volumeControl);
-
-unsigned long lastKeepAliveCheck = 0;
-
-// --- ฟังก์ชันโหลดและบันทึกค่าลง NVS ---
-void loadSettingsFromNVS() {
-  prefs.begin("preamp_cfg", true); // true = read-only mode
-  targetVolume       = constrain(prefs.getFloat("vol", 0.8f), 0.0f, 1.0f);
-  targetBassGainDb   = constrain(prefs.getFloat("bass", 0.0f), -15.0f, 15.0f);
-  targetMidGainDb    = constrain(prefs.getFloat("mid", 0.0f), -12.0f, 12.0f);
-  targetTrebleGainDb = constrain(prefs.getFloat("treble", 0.0f), -12.0f, 12.0f);
-  targetMuted        = prefs.getBool("muted", false);
-  prefs.end();
-
-  fadeVolume = targetMuted ? 0.0f : targetVolume;
-
-  Serial.printf(">> NVS Loaded: Vol=%.2f, Bass=%.1f, Mid=%.1f, Treble=%.1f, Mute=%d <<\n",
-                targetVolume, targetBassGainDb, targetMidGainDb, targetTrebleGainDb, targetMuted ? 1 : 0);
-}
-
-void saveSettingsToNVS() {
-  prefs.begin("preamp_cfg", false); // false = read/write mode
-  prefs.putFloat("vol", targetVolume);
-  prefs.putFloat("bass", targetBassGainDb);
-  prefs.putFloat("mid", targetMidGainDb);
-  prefs.putFloat("treble", targetTrebleGainDb);
-  prefs.putBool("muted", targetMuted);
-  prefs.end();
-
-  Serial.printf(">> NVS Saved: Vol=%.2f, Bass=%.1f, Mid=%.1f, Treble=%.1f, Mute=%d <<\n",
-                targetVolume, targetBassGainDb, targetMidGainDb, targetTrebleGainDb, targetMuted ? 1 : 0);
-}
-
-void applyEqGains() {
-  if (bassEq.activeInstance())   bassEq.activeInstance()->setGainDb(targetBassGainDb);
-  if (midEq.activeInstance())    midEq.activeInstance()->setGainDb(targetMidGainDb);
-  if (trebleEq.activeInstance()) trebleEq.activeInstance()->setGainDb(targetTrebleGainDb);
-}
-
+struct StereoBiquad{Biquad L,R;void set(Biquad::Type t,float f,float q,float g,float sr){L.set(t,f,q,g,sr);R.set(t,f,q,g,sr);}void process(float &l,float &r){l=L.process(l);r=R.process(r);}void reset(){L.reset();R.reset();}};
+struct Preset{float webEQ[5];float chA_hp,chA_lp;int chA_slope;float chA_delay;int chA_mode;float chB_hp,chB_lp;int chB_slope;float chB_delay;int chB_mode;};
+Preset current;Preset defaultPreset;int selectedUser=1;
+StereoBiquad webEQ[5];StereoBiquad remoteEQ[3];StereoBiquad chA_HP1,chA_HP2,chA_LP1,chA_LP2;StereoBiquad chB_HP1,chB_HP2,chB_LP1,chB_LP2;
+volatile float targetBass=0,targetMid=0,targetTreble=0,targetVolume=0.8f;volatile bool targetMuted=false;
+float curBass=0,curMid=0,curTreble=0;volatile bool eqDirty=false,volDirty=false,nvsDirty=false;
+unsigned long lastNvsChange=0;bool pendingNvs=false;
+#define DELAY_LEN 200
+float delayBufA_L[DELAY_LEN]={0},delayBufA_R[DELAY_LEN]={0},delayBufB_L[DELAY_LEN]={0},delayBufB_R[DELAY_LEN]={0};
+int delayIdxA=0,delayIdxB=0;
+float applyDelay(float *buf,int &idx,float x,float delayMs){int ds=(int)(delayMs*44.1f);if(ds<=0)return x;if(ds>=DELAY_LEN)ds=DELAY_LEN-1;int r=(idx-ds+DELAY_LEN)%DELAY_LEN;float y=buf[r];buf[idx]=x;idx=(idx+1)%DELAY_LEN;return y;}
+I2SStream i2sStreamIn; I2SStream i2sStreamOut; BufferedStream bufferedIn(i2sStreamIn,16384);
+AudioEffectStream eqStream(bufferedIn); VolumeStream volumeControl(eqStream); StreamCopy copier(i2sStreamOut,volumeControl);
+unsigned long lastAudioTime=0;bool gapMuted=false;float fadeVolume=0.8f;unsigned long fadeStartTime=0;bool isFadingUp=false;
+void setDefaultPreset(){
+for(int i=0;i<5;i++)defaultPreset.webEQ[i]=0;
+defaultPreset.chA_hp=30;defaultPreset.chA_lp=500;defaultPreset.chA_slope=24;defaultPreset.chA_delay=0;defaultPreset.chA_mode=1;
+defaultPreset.chB_hp=500;defaultPreset.chB_lp=20000;defaultPreset.chB_slope=24;defaultPreset.chB_delay=0.15;defaultPreset.chB_mode=0;
+current=defaultPreset;}
+void updateAllCoeffs(){
+float sr=(float)info.sample_rate;float wf[5]={60,250,1000,4000,10000};
+for(int i=0;i<5;i++)webEQ[i].set(Biquad::PEAKING,wf[i],1.0f,current.webEQ[i],sr);
+remoteEQ[0].set(Biquad::LOW_SHELF,125,0.7f,curBass,sr);remoteEQ[1].set(Biquad::PEAKING,1000,0.9f,curMid,sr);remoteEQ[2].set(Biquad::HIGH_SHELF,6500,0.75f,curTreble,sr);
+chA_HP1.set(Biquad::HIGH_PASS,current.chA_hp,0.707f,0,sr);chA_HP2.set(Biquad::HIGH_PASS,current.chA_hp,0.707f,0,sr);
+chA_LP1.set(Biquad::LOW_PASS,current.chA_lp,0.707f,0,sr);chA_LP2.set(Biquad::LOW_PASS,current.chA_lp,0.707f,0,sr);
+chB_HP1.set(Biquad::HIGH_PASS,current.chB_hp,0.707f,0,sr);chB_HP2.set(Biquad::HIGH_PASS,current.chB_hp,0.707f,0,sr);
+chB_LP1.set(Biquad::LOW_PASS,current.chB_lp,0.707f,0,sr);chB_LP2.set(Biquad::LOW_PASS,current.chB_lp,0.707f,0,sr);}
+void applyAll(){updateAllCoeffs();}
+void loadSettings(){
+prefs.begin("dsp_tuner",true);
+targetVolume=constrain(prefs.getFloat("vol",0.8f),0,1);targetBass=constrain(prefs.getFloat("bass",0),-15,15);
+targetMid=constrain(prefs.getFloat("mid",0),-12,12);targetTreble=constrain(prefs.getFloat("treble",0),-12,12);
+targetMuted=prefs.getBool("muted",false);
+size_t n=prefs.getBytes("user1",&current,sizeof(Preset));if(n!=sizeof(Preset))current=defaultPreset;
+selectedUser=prefs.getInt("selUser",1);prefs.end();
+curBass=targetBass;curMid=targetMid;curTreble=targetTreble;fadeVolume=targetMuted?0:targetVolume;}
+void saveSettings(){
+prefs.begin("dsp_tuner",false);prefs.putFloat("vol",targetVolume);prefs.putFloat("bass",targetBass);prefs.putFloat("mid",targetMid);prefs.putFloat("treble",targetTreble);prefs.putBool("muted",targetMuted);prefs.putInt("selUser",selectedUser);prefs.putBytes(String("user")+selectedUser,&current,sizeof(Preset));prefs.end();}
+void saveUserPreset(int idx){selectedUser=idx;prefs.begin("dsp_tuner",false);prefs.putBytes(String("user")+idx,&current,sizeof(Preset));prefs.putInt("selUser",idx);prefs.end();}
+void loadUserPreset(int idx){selectedUser=idx;prefs.begin("dsp_tuner",true);size_t n=prefs.getBytes(String("user")+idx,&current,sizeof(Preset));prefs.end();if(n!=sizeof(Preset))return;applyAll();}
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
-void OnDataRecv(const esp_now_recv_info_t * recv_info, const uint8_t *incomingDataPtr, int len) {
+void OnDataRecv(const esp_now_recv_info_t *info,const uint8_t *data,int len)
 #else
-void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingDataPtr, int len) {
+void OnDataRecv(const uint8_t *mac,const uint8_t *data,int len)
 #endif
-  if (len < sizeof(incomingData)) return;
-
-  memcpy(&incomingData, incomingDataPtr, sizeof(incomingData));
-
-  int safeMode = constrain(incomingData.controlMode, 0, 3);
-  lastModeLog = safeMode;
-  lastValLog  = incomingData.value;
-  logDirty    = true;
-
-  if (incomingData.isMuted != targetMuted) {
-    targetMuted = incomingData.isMuted;
-    volDirty = true;
-    nvsDirty = true;
-  }
-
-  if (incomingData.isMuted) return;
-
-  switch (safeMode) {
-    case 0: {
-      float newVol = constrain((float)incomingData.value / 100.0f, 0.0f, 1.0f);
-      if (fabsf(newVol - targetVolume) > 0.001f) {
-        targetVolume = newVol;
-        volDirty = true;
-        nvsDirty = true;
-      }
-      break;
-    }
-    case 1: {
-      float newBass = constrain((float)incomingData.value, -15.0f, 15.0f);
-      if (fabsf(newBass - targetBassGainDb) > 0.01f) {
-        targetBassGainDb = newBass;
-        eqDirty = true;
-        nvsDirty = true;
-      }
-      break;
-    }
-    case 2: {
-      float newMid = constrain((float)incomingData.value, -12.0f, 12.0f);
-      if (fabsf(newMid - targetMidGainDb) > 0.01f) {
-        targetMidGainDb = newMid;
-        eqDirty = true;
-        nvsDirty = true;
-      }
-      break;
-    }
-    case 3: {
-      float newTreble = constrain((float)incomingData.value, -12.0f, 12.0f);
-      if (fabsf(newTreble - targetTrebleGainDb) > 0.01f) {
-        targetTrebleGainDb = newTreble;
-        eqDirty = true;
-        nvsDirty = true;
-      }
-      break;
-    }
-  }
+{
+if(len<(int)sizeof(incomingData))return;memcpy(&incomingData,data,sizeof(incomingData));
+if(incomingData.isMuted!=targetMuted){targetMuted=incomingData.isMuted;volDirty=true;nvsDirty=true;}
+if(incomingData.isMuted)return;int m=constrain(incomingData.controlMode,0,3);
+if(m==0){float v=constrain((float)incomingData.value/100.0f,0,1);if(fabsf(v-targetVolume)>0.001){targetVolume=v;volDirty=true;nvsDirty=true;}}
+if(m==1){float v=constrain((float)incomingData.value,-15,15);if(fabsf(v-targetBass)>0.01){targetBass=v;eqDirty=true;nvsDirty=true;}}
+if(m==2){float v=constrain((float)incomingData.value,-12,12);if(fabsf(v-targetMid)>0.01){targetMid=v;eqDirty=true;nvsDirty=true;}}
+if(m==3){float v=constrain((float)incomingData.value,-12,12);if(fabsf(v-targetTreble)>0.01){targetTreble=v;eqDirty=true;nvsDirty=true;}}
 }
-
-void initWifiAndEspNow() {
-  WiFi.persistent(false);
-  WiFi.mode(WIFI_STA);
-  WiFi.disconnect();
-
-  esp_wifi_set_promiscuous(true);
-  esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
-  esp_wifi_set_promiscuous(false);
-
-  if (esp_now_init() == ESP_OK) {
-    esp_now_register_recv_cb(OnDataRecv);
-    Serial.println(">> ESP-NOW Initialized & Ready on Channel 1 <<");
-  } else {
-    Serial.println("ESP-NOW Init Failed!");
-  }
-}
-
-void setupEQ() {
-  eqStream.addEffect(bassEq);
-  eqStream.addEffect(midEq);
-  eqStream.addEffect(trebleEq);
-
-  auto eqCfg = eqStream.defaultConfig();
-  eqCfg.copyFrom(info);
-  if (!eqStream.begin(eqCfg)) {
-    Serial.println("[ERROR] EQ Stream begin failed!");
-  }
-
-  applyEqGains();
-}
-
-void setupI2S() {
-  auto configIn = i2sStreamIn.defaultConfig(RX_MODE);
-  configIn.copyFrom(info);
-  configIn.rx_tx_mode = RX_MODE;
-  configIn.port_no = 0;
-  configIn.pin_bck = I2S_IN_BCK;
-  configIn.pin_ws  = I2S_IN_LRCK;
-  configIn.pin_data = I2S_IN_DATA;
-  configIn.is_master = false;
-  configIn.buffer_count = 16;
-  configIn.buffer_size = 512;
-  if (!i2sStreamIn.begin(configIn)) {
-    Serial.println("[ERROR] I2S RX (Port 0) begin failed!");
-  }
-
-  bufferedIn.begin();
-  setupEQ();
-
-  auto configOut = i2sStreamOut.defaultConfig(TX_MODE);
-  configOut.copyFrom(info);
-  configOut.rx_tx_mode = TX_MODE;
-  configOut.port_no = 1;
-  configOut.pin_bck = I2S_BCK_PIN;
-  configOut.pin_ws  = I2S_LRCK_PIN;
-  configOut.pin_data = I2S_DATA1_PIN;
-  configOut.buffer_count = 12;
-  configOut.buffer_size = 512;
-  if (!i2sStreamOut.begin(configOut)) {
-    Serial.println("[ERROR] I2S TX (Port 1) begin failed!");
-  }
-
-  gpio_matrix_out(I2S_DATA2_PIN, i2s_periph_signal[I2S_NUM_1].data_out_sig, false, false);
-
-  auto vconfig = volumeControl.defaultConfig();
-  vconfig.copyFrom(info);
-  volumeControl.begin(vconfig);
-  volumeControl.setVolume(targetMuted ? 0.0f : targetVolume);
-
-  copier.begin(i2sStreamOut, volumeControl);
-}
-
-// ===== ฟังก์ชันเทถังทิ้ง =====
-void flushTank() {
-  uint8_t tmp[512];
-  while (bufferedIn.available() > 0) {
-    int n = bufferedIn.readBytes(tmp, sizeof(tmp));
-    if (n <= 0) break;
-  }
-  applyEqGains();
-  Serial.println(">> Flush Tank: เทน้ำเก่าทิ้งแล้ว <<");
-}
-
-void setup() {
-  Serial.begin(115200);
-  delay(1000);
-
-  loadSettingsFromNVS();
-  setupI2S();
-  initWifiAndEspNow();
-
-  lastAudioTime = millis();
-  Serial.println(">> ESP32-S3 Preamp EQ Ready (ESP-NOW + NVS + ASRC + Flush Tank) <<");
-}
-
-void loop() {
-  // ===== 1. เช็คว่ามีเพลงมาไหม =====
-  int avail = bufferedIn.available();
-  unsigned long now = millis();
-
-  if (avail > 200) {
-    lastAudioTime = now;
-    if (gapMuted) {
-      gapMuted = false;
-      isFadingUp = true;
-      fadeStartTime = now;
-      fadeVolume = 0.0f;
-      volumeControl.setVolume(0.0f);
-      Serial.println(">> เพลงใหม่มาแล้ว เฟดขึ้น 30ms <<");
-    }
-  }
-
-  // ===== 2. ไม่มีเพลงมาเกิน 100ms = เปลี่ยนเพลงแล้ว =====
-  if (!gapMuted && (now - lastAudioTime > 100)) {
-    volumeControl.setVolume(0.0f);
-    delay(10);
-    flushTank();
-    gapMuted = true;
-    isFadingUp = false;
-    Serial.println(">> ไม่มีเพลง 100ms เทถัง + Mute <<");
-  }
-
-  // ===== 3. เฟดขึ้น 30ms ตอนเพลงใหม่มา =====
-  if (isFadingUp) {
-    unsigned long elapsed = now - fadeStartTime;
-    if (elapsed >= 30) {
-      fadeVolume = targetMuted ? 0.0f : targetVolume;
-      volumeControl.setVolume(fadeVolume);
-      isFadingUp = false;
-    } else {
-      float progress = (float)elapsed / 30.0f;
-      fadeVolume = (targetMuted ? 0.0f : targetVolume) * progress;
-      volumeControl.setVolume(fadeVolume);
-    }
-  }
-
-  // ===== 4. ถ้ากำลัง Mute รอเพลงใหม่ ไม่ต้อง copy =====
-  if (!gapMuted) {
-    copier.copy();
-  } else {
-    delay(1);
-  }
-
-  // ===== ตัวแก้เสียงแก๊ก ASRC - ปรับเองอัตโนมัติ =====
-  static int asrcCount = 0;
-  static int currentRate = 44100;
-  if (++asrcCount > 100) {
-    asrcCount = 0;
-    int available = bufferedIn.available();
-
-    int targetRate = 44100;
-    if (available > 12000) {
-      targetRate = 44120; // น้ำเยอะ -> เร่งระบาย
-    } else if (available < 4000) {
-      targetRate = 44080; // น้ำน้อย -> ชะลอให้รอ
-    }
-
-    if (targetRate != currentRate) {
-      currentRate = targetRate;
-      i2s_set_sample_rates((i2s_port_t)1, targetRate);
-    }
-  }
-
-  if (volDirty) {
-    volDirty = false;
-    if (!gapMuted && !isFadingUp) {
-      volumeControl.setVolume(targetMuted ? 0.0f : targetVolume);
-    }
-  }
-
-  if (eqDirty) {
-    eqDirty = false;
-    applyEqGains();
-  }
-
-  // บันทึกลง NVS แบบหน่วงนิ่ง ~250ms หลังขยับปุ่ม เพื่อไม่ให้เขียนซ้ำถี่เกินไปตอนหมุน/ลากค่า
-  static unsigned long lastNvsChangeTime = 0;
-  static bool pendingNvsSave = false;
-  if (nvsDirty) {
-    nvsDirty = false;
-    lastNvsChangeTime = now;
-    pendingNvsSave = true;
-  }
-  if (pendingNvsSave && (now - lastNvsChangeTime >= 4500)) {
-    pendingNvsSave = false;
-    saveSettingsToNVS();
-  }
+void initWifiAndEspNow(){
+WiFi.persistent(false);WiFi.mode(WIFI_AP_STA);WiFi.softAP("DSP-TUNER","12345678",1);WiFi.disconnect();
+esp_wifi_set_promiscuous(true);esp_wifi_set_channel(1,WIFI_SECOND_CHAN_NONE);esp_wifi_set_promiscuous(false);
+if(esp_now_init()==ESP_OK){esp_now_register_recv_cb(OnDataRecv);Serial.println("ESP-NOW Ready Ch1");}else Serial.println("ESP-NOW Fail");}
+const char* HTML_PAGE = R"HTML(
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DSP TUNER</title><style>*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:#fff;color:#111;padding:16px;max-width:480px;margin:auto}h1{text-align:center;font-size:28px;margin:8px 0 16px}.label{font-weight:bold;margin:12px 0 6px}.box{background:#e8e8e8;border-radius:10px;padding:12px;margin-bottom:12px}.row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:8px 0}.row label{flex:1}.row input{width:90px;padding:8px;font-size:16px}.row select{width:90px;padding:8px;font-size:16px}.btn{padding:10px 14px;border:1px solid #ccc;background:#fff;border-radius:8px;font-size:16px;cursor:pointer}.btn.sel{background:#111;color:#fff}.btn-green{background:#22c55e;color:#fff;border-color:#22c55e}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.full{width:100%;padding:12px;font-size:18px;border-radius:10px}</style></head><body><h1>DSP TUNER</h1><div class="label">CROSSOVER</div><div class="box"><b>CHANNEL A</b><div class="row"><label>Filter 1 Hi-Pass</label><input id="a_hp" type="number" value="30"><span>Hz</span></div><div class="row"><label>Filter 2 Low-Pass</label><input id="a_lp" type="number" value="500"><span>Hz</span></div><div class="row"><label>Delay</label><input id="a_dly" type="number" step="0.01" value="0"><span>ms</span></div><div class="row"><label>Mode</label><button class="btn" onclick="setMode('A','STEREO',this)">STEREO</button><button class="btn sel" onclick="setMode('A','MONO',this)">MONO</button></div></div><div class="box"><b>CHANNEL B</b><div class="row"><label>Filter 1 Hi-Pass</label><input id="b_hp" type="number" value="500"><span>Hz</span></div><div class="row"><label>Filter 2 Low-Pass</label><input id="b_lp" type="number" value="20000"><span>Hz</span></div><div class="row"><label>Delay</label><input id="b_dly" type="number" step="0.01" value="0.15"><span>ms</span></div><div class="row"><label>Mode</label><button class="btn sel" onclick="setMode('B','STEREO',this)">STEREO</button><button class="btn" onclick="setMode('B','MONO',this)">MONO</button></div></div><button class="btn full" onclick="applyCrossover()">APPLY</button><div class="label">EQ - 5 BANDS</div><div class="box"><div class="row"><label>60 Hz</label><input id="eq0" type="number" value="0"><span>dB</span></div><div class="row"><label>250 Hz</label><input id="eq1" type="number" value="0"><span>dB</span></div><div class="row"><label>1 kHz</label><input id="eq2" type="number" value="0"><span>dB</span></div><div class="row"><label>4 kHz</label><input id="eq3" type="number" value="0"><span>dB</span></div><div class="row"><label>10 kHz</label><input id="eq4" type="number" value="0"><span>dB</span></div></div><div class="label">USER PRESET</div><div class="grid"><button class="btn" onclick="loadUser(1,this)">USER 1</button><button class="btn" onclick="loadUser(2,this)">USER 2</button><button class="btn" onclick="loadUser(3,this)">USER 3</button><button class="btn" onclick="loadUser(4,this)">USER 4</button></div><br><div style="display:flex;gap:10px"><button class="btn full" onclick="doDefault()">DEFAULT</button><button class="btn full btn-green" onclick="doSave()">SAVE</button></div><p id="msg" style="text-align:center"></p><script>let modeA='MONO',modeB='STEREO',selUser=1;document.querySelectorAll('input[type=number]').forEach(el=>{el.addEventListener('focus',()=>el.select());el.addEventListener('blur',()=>{if(el.value==='')el.value='0';});});function setMode(ch,m,btn){if(ch==='A')modeA=m;else modeB=m;btn.parentElement.querySelectorAll('.btn').forEach(b=>b.classList.remove('sel'));btn.classList.add('sel');}function collect(){return{a_hp:+document.getElementById('a_hp').value,a_lp:+document.getElementById('a_lp').value,a_dly:+document.getElementById('a_dly').value,b_hp:+document.getElementById('b_hp').value,b_lp:+document.getElementById('b_lp').value,b_dly:+document.getElementById('b_dly').value,eq:[+document.getElementById('eq0').value,+document.getElementById('eq1').value,+document.getElementById('eq2').value,+document.getElementById('eq3').value,+document.getElementById('eq4').value],modeA,modeB,user:selUser};}async function applyCrossover(){let d=collect();let r=await fetch('/api/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});document.getElementById('msg').textContent=await r.text();}async function doSave(){let d=collect();let r=await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});document.getElementById('msg').textContent=await r.text();}async function doDefault(){let r=await fetch('/api/default',{method:'POST'});document.getElementById('msg').textContent=await r.text();location.reload();}async function loadUser(n,btn){selUser=n;document.querySelectorAll('.grid .btn').forEach(b=>b.classList.remove('sel'));btn.classList.add('sel');let r=await fetch('/api/load?user='+n);let j=await r.json();document.getElementById('a_hp').value=j.a_hp;document.getElementById('a_lp').value=j.a_lp;document.getElementById('b_hp').value=j.b_hp;document.getElementById('b_lp').value=j.b_lp;document.getElementById('eq0').value=j.eq[0];document.getElementById('eq1').value=j.eq[1];document.getElementById('eq2').value=j.eq[2];document.getElementById('eq3').value=j.eq[3];document.getElementById('eq4').value=j.eq[4];}</script></body></html>
+)HTML";
+float getVal(String &body,const char* key){int idx=body.indexOf(key);if(idx<0)return 0;int c=body.indexOf(':',idx);return body.substring(c+1).toFloat();}
+void parseBody(String body){
+if(body.length()<10)return;
+current.chA_hp=constrain(getVal(body,"\"a_hp\""),20,1000);current.chA_lp=constrain(getVal(body,"\"a_lp\""),100,5000);
+current.chB_hp=constrain(getVal(body,"\"b_hp\""),100,5000);current.chB_lp=constrain(getVal(body,"\"b_lp\""),1000,20000);
+current.chA_delay=constrain(getVal(body,"\"a_dly\""),0,5);current.chB_delay=constrain(getVal(body,"\"b_dly\""),0,5);
+int eqIdx=body.indexOf("\"eq\"");if(eqIdx>=0){int br=body.indexOf('[',eqIdx);int br2=body.indexOf(']',br);String arr=body.substring(br+1,br2);for(int i=0;i<5;i++){int cm=arr.indexOf(',');String tok=(cm>=0)?arr.substring(0,cm):arr;current.webEQ[i]=constrain(tok.toFloat(),-12,12);if(cm<0)break;arr=arr.substring(cm+1);}}
+if(body.indexOf("\"modeA\":\"MONO\"")>=0)current.chA_mode=1;else if(body.indexOf("\"modeA\"")>=0)current.chA_mode=0;
+if(body.indexOf("\"modeB\":\"MONO\"")>=0)current.chB_mode=1;else if(body.indexOf("\"modeB\"")>=0)current.chB_mode=0;
+int uIdx=body.indexOf("\"user\"");if(uIdx>=0){int c=body.indexOf(':',uIdx);selectedUser=constrain((int)body.substring(c+1).toFloat(),1,4);}
+applyAll();}
+void setupWeb(){
+server.on("/",[](){server.send(200,"text/html",HTML_PAGE);});
+server.on("/api/apply",HTTP_POST,[](){String b=server.arg("plain");parseBody(b);server.send(200,"text/plain","Applied - not saved yet");});
+server.on("/api/save",HTTP_POST,[](){String b=server.arg("plain");parseBody(b);saveUserPreset(selectedUser);saveSettings();server.send(200,"text/plain",String("Saved to USER ")+selectedUser);});
+server.on("/api/default",HTTP_POST,[](){current=defaultPreset;applyAll();saveUserPreset(selectedUser);saveSettings();server.send(200,"text/plain","Reset to DEFAULT Flat");});
+server.on("/api/load",HTTP_GET,[](){int u=server.arg("user").toInt();if(u<1||u>4)u=1;loadUserPreset(u);String j=String("{\"a_hp\":")+current.chA_hp+",\"a_lp\":"+current.chA_lp+",\"b_hp\":"+current.chB_hp+",\"b_lp\":"+current.chB_lp+",\"eq\":["+current.webEQ[0]+","+current.webEQ[1]+","+current.webEQ[2]+","+current.webEQ[3]+","+current.webEQ[4]+"]}";server.send(200,"application/json",j);});
+server.begin();Serial.println("Web: http://192.168.4.1/ SSID DSP-TUNER");}
+void setupI2S(){
+auto configIn=i2sStreamIn.defaultConfig(RX_MODE);configIn.copyFrom(info);configIn.rx_tx_mode=RX_MODE;configIn.port_no=0;configIn.pin_bck=I2S_IN_BCK;configIn.pin_ws=I2S_IN_LRCK;configIn.pin_data=I2S_IN_DATA;configIn.is_master=false;configIn.buffer_count=16;configIn.buffer_size=512;i2sStreamIn.begin(configIn);bufferedIn.begin();
+auto configOut=i2sStreamOut.defaultConfig(TX_MODE);configOut.copyFrom(info);configOut.rx_tx_mode=TX_MODE;configOut.port_no=1;configOut.pin_bck=I2S_BCK_PIN;configOut.pin_ws=I2S_LRCK_PIN;configOut.pin_data=I2S_DATA1_PIN;configOut.buffer_count=12;configOut.buffer_size=512;i2sStreamOut.begin(configOut);
+gpio_matrix_out(I2S_DATA2_PIN,i2s_periph_signal[I2S_NUM_1].data_out_sig,false,false);
+auto vconfig=volumeControl.defaultConfig();vconfig.copyFrom(info);volumeControl.begin(vconfig);volumeControl.setVolume(targetMuted?0:targetVolume);copier.begin(i2sStreamOut,volumeControl);}
+void flushTank(){uint8_t tmp[512];while(bufferedIn.available()>0){int n=bufferedIn.readBytes(tmp,sizeof(tmp));if(n<=0)break;}Serial.println("Flush Tank");}
+void setup(){Serial.begin(115200);delay(1000);setDefaultPreset();loadSettings();setupI2S();updateAllCoeffs();initWifiAndEspNow();setupWeb();lastAudioTime=millis();Serial.println("S3 DSP Ready");}
+void loop(){
+server.handleClient();int avail=bufferedIn.available();unsigned long now=millis();
+if(avail>200){lastAudioTime=now;if(gapMuted){gapMuted=false;isFadingUp=true;fadeStartTime=now;fadeVolume=0;volumeControl.setVolume(0);}}
+if(!gapMuted&&(now-lastAudioTime>100)){volumeControl.setVolume(0);delay(10);flushTank();gapMuted=true;isFadingUp=false;}
+if(isFadingUp){unsigned long el=now-fadeStartTime;if(el>=30){fadeVolume=targetMuted?0:targetVolume;volumeControl.setVolume(fadeVolume);isFadingUp=false;}else{float p=(float)el/30.0f;fadeVolume=(targetMuted?0:targetVolume)*p;volumeControl.setVolume(fadeVolume);}}
+if(!gapMuted)copier.copy();else delay(1);
+static int asrcCount=0;static int curRate=44100;if(++asrcCount>100){asrcCount=0;int av=bufferedIn.available();int tr=44100;if(av>12000)tr=44120;else if(av<4000)tr=44080;if(tr!=curRate){curRate=tr;i2s_set_sample_rates((i2s_port_t)1,tr);}}
+if(volDirty){volDirty=false;if(!gapMuted&&!isFadingUp)volumeControl.setVolume(targetMuted?0:targetVolume);}
+bool needUpdate=false;
+if(fabsf(targetBass-curBass)>0.01){curBass+=(targetBass>curBass?0.05f:-0.05f);needUpdate=true;}
+if(fabsf(targetMid-curMid)>0.01){curMid+=(targetMid>curMid?0.05f:-0.05f);needUpdate=true;}
+if(fabsf(targetTreble-curTreble)>0.01){curTreble+=(targetTreble>curTreble?0.05f:-0.05f);needUpdate=true;}
+if(needUpdate||eqDirty){eqDirty=false;float sr=(float)info.sample_rate;remoteEQ[0].set(Biquad::LOW_SHELF,125,0.7f,curBass,sr);remoteEQ[1].set(Biquad::PEAKING,1000,0.9f,curMid,sr);remoteEQ[2].set(Biquad::HIGH_SHELF,6500,0.75f,curTreble,sr);}
+if(nvsDirty){nvsDirty=false;lastNvsChange=now;pendingNvs=true;}
+if(pendingNvs&&(now-lastNvsChange>=4500)){pendingNvs=false;saveSettings();}
 }
