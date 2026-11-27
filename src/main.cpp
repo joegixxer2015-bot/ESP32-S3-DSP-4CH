@@ -75,13 +75,18 @@ void OnDataRecv(const esp_now_recv_info_t *info,const uint8_t *data,int len)
 void OnDataRecv(const uint8_t *mac,const uint8_t *data,int len)
 #endif
 {
-if(len<(int)sizeof(incomingData))return;memcpy(&incomingData,data,sizeof(incomingData));
-if(incomingData.isMuted!=targetMuted){targetMuted=incomingData.isMuted;volDirty=true;nvsDirty=true;}
-if(incomingData.isMuted)return;int m=constrain(incomingData.controlMode,0,3);
-if(m==0){float v=constrain((float)incomingData.value/100.0f,0,1);if(fabsf(v-targetVolume)>0.001){targetVolume=v;volDirty=true;nvsDirty=true;}}
-if(m==1){float v=constrain((float)incomingData.value,-15,15);if(fabsf(v-targetBass)>0.01){targetBass=v;eqDirty=true;nvsDirty=true;}}
-if(m==2){float v=constrain((float)incomingData.value,-12,12);if(fabsf(v-targetMid)>0.01){targetMid=v;eqDirty=true;nvsDirty=true;}}
-if(m==3){float v=constrain((float)incomingData.value,-12,12);if(fabsf(v-targetTreble)>0.01){targetTreble=v;eqDirty=true;nvsDirty=true;}}
+if(len<(int)sizeof(incomingData)){Serial.printf("ESP-NOW BAD LEN %d expect %d\n",len,(int)sizeof(incomingData));return;}
+memcpy(&incomingData,data,sizeof(incomingData));
+Serial.printf("ESP-NOW RX mode=%d val=%d muted=%d | BEFORE vol=%.2f bass=%.1f mid=%.1f treble=%.1f\n",incomingData.controlMode,incomingData.value,(int)incomingData.isMuted,targetVolume,targetBass,targetMid,targetTreble);
+if(incomingData.controlMode<0||incomingData.controlMode>3){Serial.println("ESP-NOW IGNORE bad mode");return;}
+if(incomingData.isMuted!=targetMuted){targetMuted=incomingData.isMuted;volDirty=true;nvsDirty=true;Serial.printf("ESP-NOW MUTE CHANGED -> %d\n",(int)targetMuted);}
+if(incomingData.isMuted)return;
+int m=incomingData.controlMode;
+if(m==0){float v=constrain((float)incomingData.value/100.0f,0,1);if(fabsf(v-targetVolume)>0.001){targetVolume=v;volDirty=true;nvsDirty=true;Serial.printf("ESP-NOW VOL -> %.2f\n",targetVolume);}}
+if(m==1){float v=constrain((float)incomingData.value,-15,15);if(fabsf(v-targetBass)>0.01){targetBass=v;eqDirty=true;nvsDirty=true;Serial.printf("ESP-NOW BASS -> %.1f\n",targetBass);}}
+if(m==2){float v=constrain((float)incomingData.value,-12,12);if(fabsf(v-targetMid)>0.01){targetMid=v;eqDirty=true;nvsDirty=true;Serial.printf("ESP-NOW MID -> %.1f\n",targetMid);}}
+if(m==3){float v=constrain((float)incomingData.value,-12,12);if(fabsf(v-targetTreble)>0.01){targetTreble=v;eqDirty=true;nvsDirty=true;Serial.printf("ESP-NOW TREBLE -> %.1f\n",targetTreble);}}
+Serial.printf("ESP-NOW AFTER vol=%.2f bass=%.1f mid=%.1f treble=%.1f muted=%d\n",targetVolume,targetBass,targetMid,targetTreble,(int)targetMuted);
 }
 void initWifiAndEspNow(){
 WiFi.persistent(false);WiFi.mode(WIFI_AP_STA);WiFi.softAP("DSP-TUNER","12345678",1);WiFi.disconnect();
