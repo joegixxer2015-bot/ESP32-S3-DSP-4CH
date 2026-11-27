@@ -74,9 +74,9 @@ size_t n=prefs.getBytes("user1",&current,sizeof(Preset));if(n!=sizeof(Preset))cu
 selectedUser=prefs.getInt("selUser",1);prefs.end();
 curBass=targetBass;curMid=targetMid;curTreble=targetTreble;fadeVolume=targetMuted?0:targetVolume;}
 void saveSettings(){
-prefs.begin("dsp_tuner",false);prefs.putFloat("vol",targetVolume);prefs.putFloat("bass",targetBass);prefs.putFloat("mid",targetMid);prefs.putFloat("treble",targetTreble);prefs.putBool("muted",targetMuted);prefs.putInt("selUser",selectedUser);prefs.putBytes(String("user")+selectedUser,&current,sizeof(Preset));prefs.end();}
-void saveUserPreset(int idx){selectedUser=idx;prefs.begin("dsp_tuner",false);prefs.putBytes(String("user")+idx,&current,sizeof(Preset));prefs.putInt("selUser",idx);prefs.end();}
-void loadUserPreset(int idx){selectedUser=idx;prefs.begin("dsp_tuner",true);size_t n=prefs.getBytes(String("user")+idx,&current,sizeof(Preset));prefs.end();if(n!=sizeof(Preset))return;applyAll();}
+prefs.begin("dsp_tuner",false);prefs.putFloat("vol",targetVolume);prefs.putFloat("bass",targetBass);prefs.putFloat("mid",targetMid);prefs.putFloat("treble",targetTreble);prefs.putBool("muted",targetMuted);prefs.putInt("selUser",selectedUser);prefs.putBytes((String("user")+selectedUser).c_str(),&current,sizeof(Preset));prefs.end();}
+void saveUserPreset(int idx){selectedUser=idx;prefs.begin("dsp_tuner",false);prefs.putBytes((String("user")+idx).c_str(),&current,sizeof(Preset));prefs.putInt("selUser",idx);prefs.end();}
+void loadUserPreset(int idx){selectedUser=idx;prefs.begin("dsp_tuner",true);size_t n=prefs.getBytes((String("user")+idx).c_str(),&current,sizeof(Preset));prefs.end();if(n!=sizeof(Preset))return;applyAll();}
 #if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
 void OnDataRecv(const esp_now_recv_info_t *info,const uint8_t *data,int len)
 #else
