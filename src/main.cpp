@@ -12,7 +12,6 @@ void setDefaultPreset();void updateAllCoeffs();void applyAll();void loadSettings
 #define I2S_BCK_PIN 15
 #define I2S_LRCK_PIN 16
 #define I2S_DATA1_PIN 17
-#define I2S_DATA2_PIN 18
 #define I2S_IN_BCK 4
 #define I2S_IN_LRCK 5
 #define I2S_IN_DATA 6
@@ -37,35 +36,14 @@ float process(float x){float y=b0*x+b1*x1+b2*x2-a1*y1-a2*y2;x2=x1;x1=x;y2=y1;y1=
 void reset(){x1=x2=y1=y2=0;}
 private:float b0=1,b1=0,b2=0,a1=0,a2=0,x1=0,x2=0,y1=0,y2=0;
 };
-struct StereoBiquad{Biquad L,R;void set(Biquad::Type t,float f,float q,float g,float sr){L.set(t,f,q,g,sr);R.set(t,f,q,g,sr);}void process(float &l,float &r){l=L.process(l);r=R.process(r);}void reset(){L.reset();R.reset();}};
+struct StereoBiquad{Biquad L,R;void set(Biquad::Type t,float f,float q,float g,float sr){L.set(t,f,q,g,sr);R.set(t,f,q,g,sr);}void process(float &l,float &r){l=L.process(l);r=R.process(r);}};
 struct Preset{float webEQ[5];float chA_hp,chA_lp;int chA_slope;float chA_delay;int chA_mode;float chB_hp,chB_lp;int chB_slope;float chB_delay;int chB_mode;};
 Preset current;Preset defaultPreset;int selectedUser=1;
-StereoBiquad webEQ[5];StereoBiquad remoteEQ[3];StereoBiquad chA_HP1,chA_HP2,chA_LP1,chA_LP2;StereoBiquad chB_HP1,chB_HP2,chB_LP1,chB_LP2;
+StereoBiquad webEQ[5];StereoBiquad remoteEQ[3];StereoBiquad chB_HP1,chB_HP2,chB_LP1,chB_LP2;
 volatile float targetBass=0,targetMid=0,targetTreble=0,targetVolume=0.8f;volatile bool targetMuted=false;
 float curBass=0,curMid=0,curTreble=0;volatile bool eqDirty=false,volDirty=false,nvsDirty=false;
 unsigned long lastNvsChange=0;bool pendingNvs=false;
-#define DELAY_LEN 200
-float delayBufA_L[DELAY_LEN]={0},delayBufA_R[DELAY_LEN]={0},delayBufB_L[DELAY_LEN]={0},delayBufB_R[DELAY_LEN]={0};
-int delayIdxA=0,delayIdxB=0;
-class DspEffect : public AudioEffect{
-public:
-bool begin(AudioInfo info) override { setAudioInfo(info); return true; }
-size_t process(uint8_t *data, size_t len) override {
-int16_t *s=(int16_t*)data; int frames=len/4;
-for(int i=0;i<frames;i++){
-float l=s[i*2]; float r=s[i*2+1];
-for(int k=0;k<5;k++) webEQ[k].process(l,r);
-for(int k=0;k<3;k++) remoteEQ[k].process(l,r);
-if(l>32767)l=32767; if(l<-32768)l=-32768; if(r>32767)r=32767; if(r<-32768)r=-32768;
-s[i*2]=(int16_t)l; s[i*2+1]=(int16_t)r;
-}
-return len;
-}
-void end() override {}
-};
-DspEffect dspEffect;
-I2SStream i2sStreamIn; I2SStream i2sStreamOut; BufferedStream bufferedIn(i2sStreamIn,16384);
-AudioEffectStream eqStream(bufferedIn); VolumeStream volumeControl(eqStream); StreamCopy copier(i2sStreamOut,volumeControl);
+I2SStream i2sStreamIn; I2SStream i2sStreamOut;
 unsigned long lastAudioTime=0;bool gapMuted=false;float fadeVolume=0.8f;unsigned long fadeStartTime=0;bool isFadingUp=false;
 void setDefaultPreset(){
 for(int i=0;i<5;i++)defaultPreset.webEQ[i]=0;
@@ -76,8 +54,6 @@ void updateAllCoeffs(){
 float sr=(float)info.sample_rate;float wf[5]={60,250,1000,4000,10000};
 for(int i=0;i<5;i++)webEQ[i].set(Biquad::PEAKING,wf[i],1.0f,current.webEQ[i],sr);
 remoteEQ[0].set(Biquad::LOW_SHELF,125,0.7f,curBass,sr);remoteEQ[1].set(Biquad::PEAKING,1000,0.9f,curMid,sr);remoteEQ[2].set(Biquad::HIGH_SHELF,6500,0.75f,curTreble,sr);
-chA_HP1.set(Biquad::HIGH_PASS,current.chA_hp,0.707f,0,sr);chA_HP2.set(Biquad::HIGH_PASS,current.chA_hp,0.707f,0,sr);
-chA_LP1.set(Biquad::LOW_PASS,current.chA_lp,0.707f,0,sr);chA_LP2.set(Biquad::LOW_PASS,current.chA_lp,0.707f,0,sr);
 chB_HP1.set(Biquad::HIGH_PASS,current.chB_hp,0.707f,0,sr);chB_HP2.set(Biquad::HIGH_PASS,current.chB_hp,0.707f,0,sr);
 chB_LP1.set(Biquad::LOW_PASS,current.chB_lp,0.707f,0,sr);chB_LP2.set(Biquad::LOW_PASS,current.chB_lp,0.707f,0,sr);}
 void applyAll(){updateAllCoeffs();}
@@ -112,7 +88,7 @@ WiFi.persistent(false);WiFi.mode(WIFI_AP_STA);WiFi.softAP("DSP-TUNER","12345678"
 esp_wifi_set_promiscuous(true);esp_wifi_set_channel(1,WIFI_SECOND_CHAN_NONE);esp_wifi_set_promiscuous(false);
 if(esp_now_init()==ESP_OK){esp_now_register_recv_cb(OnDataRecv);Serial.println("ESP-NOW Ready Ch1");}else Serial.println("ESP-NOW Fail");}
 const char* HTML_PAGE = R"HTML(
-<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DSP TUNER</title><style>*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:#fff;color:#111;padding:16px;max-width:480px;margin:auto}h1{text-align:center;font-size:28px;margin:8px 0 16px}.label{font-weight:bold;margin:12px 0 6px}.box{background:#e8e8e8;border-radius:10px;padding:12px;margin-bottom:12px}.row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:8px 0}.row label{flex:1}.row input{width:90px;padding:8px;font-size:16px}.row select{width:90px;padding:8px;font-size:16px}.btn{padding:10px 14px;border:1px solid #ccc;background:#fff;border-radius:8px;font-size:16px;cursor:pointer}.btn.sel{background:#111;color:#fff}.btn-green{background:#22c55e;color:#fff;border-color:#22c55e}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.full{width:100%;padding:12px;font-size:18px;border-radius:10px}</style></head><body><h1>DSP TUNER</h1><div class="label">CROSSOVER</div><div class="box"><b>CHANNEL A</b><div class="row"><label>Filter 1 Hi-Pass</label><input id="a_hp" type="number" value="30"><span>Hz</span></div><div class="row"><label>Filter 2 Low-Pass</label><input id="a_lp" type="number" value="500"><span>Hz</span></div><div class="row"><label>Delay</label><input id="a_dly" type="number" step="0.01" value="0"><span>ms</span></div><div class="row"><label>Mode</label><button class="btn" onclick="setMode('A','STEREO',this)">STEREO</button><button class="btn sel" onclick="setMode('A','MONO',this)">MONO</button></div></div><div class="box"><b>CHANNEL B</b><div class="row"><label>Filter 1 Hi-Pass</label><input id="b_hp" type="number" value="500"><span>Hz</span></div><div class="row"><label>Filter 2 Low-Pass</label><input id="b_lp" type="number" value="20000"><span>Hz</span></div><div class="row"><label>Delay</label><input id="b_dly" type="number" step="0.01" value="0.15"><span>ms</span></div><div class="row"><label>Mode</label><button class="btn sel" onclick="setMode('B','STEREO',this)">STEREO</button><button class="btn" onclick="setMode('B','MONO',this)">MONO</button></div></div><button class="btn full" onclick="applyCrossover()">APPLY</button><div class="label">EQ - 5 BANDS</div><div class="box"><div class="row"><label>60 Hz</label><input id="eq0" type="number" value="0"><span>dB</span></div><div class="row"><label>250 Hz</label><input id="eq1" type="number" value="0"><span>dB</span></div><div class="row"><label>1 kHz</label><input id="eq2" type="number" value="0"><span>dB</span></div><div class="row"><label>4 kHz</label><input id="eq3" type="number" value="0"><span>dB</span></div><div class="row"><label>10 kHz</label><input id="eq4" type="number" value="0"><span>dB</span></div></div><div class="label">USER PRESET</div><div class="grid"><button class="btn" onclick="loadUser(1,this)">USER 1</button><button class="btn" onclick="loadUser(2,this)">USER 2</button><button class="btn" onclick="loadUser(3,this)">USER 3</button><button class="btn" onclick="loadUser(4,this)">USER 4</button></div><br><div style="display:flex;gap:10px"><button class="btn full" onclick="doDefault()">DEFAULT</button><button class="btn full btn-green" onclick="doSave()">SAVE</button></div><p id="msg" style="text-align:center"></p><script>let modeA='MONO',modeB='STEREO',selUser=1;document.querySelectorAll('input[type=number]').forEach(el=>{el.addEventListener('focus',()=>el.select());el.addEventListener('blur',()=>{if(el.value==='')el.value='0';});});function setMode(ch,m,btn){if(ch==='A')modeA=m;else modeB=m;btn.parentElement.querySelectorAll('.btn').forEach(b=>b.classList.remove('sel'));btn.classList.add('sel');}function collect(){return{a_hp:+document.getElementById('a_hp').value,a_lp:+document.getElementById('a_lp').value,a_dly:+document.getElementById('a_dly').value,b_hp:+document.getElementById('b_hp').value,b_lp:+document.getElementById('b_lp').value,b_dly:+document.getElementById('b_dly').value,eq:[+document.getElementById('eq0').value,+document.getElementById('eq1').value,+document.getElementById('eq2').value,+document.getElementById('eq3').value,+document.getElementById('eq4').value],modeA,modeB,user:selUser};}async function applyCrossover(){let d=collect();let r=await fetch('/api/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});document.getElementById('msg').textContent=await r.text();}async function doSave(){let d=collect();let r=await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});document.getElementById('msg').textContent=await r.text();}async function doDefault(){let r=await fetch('/api/default',{method:'POST'});document.getElementById('msg').textContent=await r.text();location.reload();}async function loadUser(n,btn){selUser=n;document.querySelectorAll('.grid .btn').forEach(b=>b.classList.remove('sel'));btn.classList.add('sel');let r=await fetch('/api/load?user='+n);let j=await r.json();document.getElementById('a_hp').value=j.a_hp;document.getElementById('a_lp').value=j.a_lp;document.getElementById('b_hp').value=j.b_hp;document.getElementById('b_lp').value=j.b_lp;document.getElementById('eq0').value=j.eq[0];document.getElementById('eq1').value=j.eq[1];document.getElementById('eq2').value=j.eq[2];document.getElementById('eq3').value=j.eq[3];document.getElementById('eq4').value=j.eq[4];}</script></body></html>
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DSP TUNER</title><style>*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:#fff;color:#111;padding:16px;max-width:480px;margin:auto}h1{text-align:center;font-size:28px;margin:8px 0 16px}.label{font-weight:bold;margin:12px 0 6px}.box{background:#e8e8e8;border-radius:10px;padding:12px;margin-bottom:12px}.row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:8px 0}.row label{flex:1}.row input{width:90px;padding:8px;font-size:16px}.btn{padding:10px 14px;border:1px solid #ccc;background:#fff;border-radius:8px;font-size:16px;cursor:pointer}.btn.sel{background:#111;color:#fff}.btn-green{background:#22c55e;color:#fff;border-color:#22c55e}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.full{width:100%;padding:12px;font-size:18px;border-radius:10px}</style></head><body><h1>DSP TUNER</h1><div class="label">CROSSOVER</div><div class="box"><b>CHANNEL A</b><div class="row"><label>Filter 1 Hi-Pass</label><input id="a_hp" type="number" value="30"><span>Hz</span></div><div class="row"><label>Filter 2 Low-Pass</label><input id="a_lp" type="number" value="500"><span>Hz</span></div><div class="row"><label>Delay</label><input id="a_dly" type="number" step="0.01" value="0"><span>ms</span></div><div class="row"><label>Mode</label><button class="btn" onclick="setMode('A','STEREO',this)">STEREO</button><button class="btn sel" onclick="setMode('A','MONO',this)">MONO</button></div></div><div class="box"><b>CHANNEL B</b><div class="row"><label>Filter 1 Hi-Pass</label><input id="b_hp" type="number" value="500"><span>Hz</span></div><div class="row"><label>Filter 2 Low-Pass</label><input id="b_lp" type="number" value="20000"><span>Hz</span></div><div class="row"><label>Delay</label><input id="b_dly" type="number" step="0.01" value="0.15"><span>ms</span></div><div class="row"><label>Mode</label><button class="btn sel" onclick="setMode('B','STEREO',this)">STEREO</button><button class="btn" onclick="setMode('B','MONO',this)">MONO</button></div></div><button class="btn full" onclick="applyCrossover()">APPLY</button><div class="label">EQ - 5 BANDS</div><div class="box"><div class="row"><label>60 Hz</label><input id="eq0" type="number" value="0"><span>dB</span></div><div class="row"><label>250 Hz</label><input id="eq1" type="number" value="0"><span>dB</span></div><div class="row"><label>1 kHz</label><input id="eq2" type="number" value="0"><span>dB</span></div><div class="row"><label>4 kHz</label><input id="eq3" type="number" value="0"><span>dB</span></div><div class="row"><label>10 kHz</label><input id="eq4" type="number" value="0"><span>dB</span></div></div><div class="label">USER PRESET</div><div class="grid"><button class="btn" onclick="loadUser(1,this)">USER 1</button><button class="btn" onclick="loadUser(2,this)">USER 2</button><button class="btn" onclick="loadUser(3,this)">USER 3</button><button class="btn" onclick="loadUser(4,this)">USER 4</button></div><br><div style="display:flex;gap:10px"><button class="btn full" onclick="doDefault()">DEFAULT</button><button class="btn full btn-green" onclick="doSave()">SAVE</button></div><p id="msg" style="text-align:center"></p><script>let modeA='MONO',modeB='STEREO',selUser=1;document.querySelectorAll('input[type=number]').forEach(el=>{el.addEventListener('focus',()=>el.select());el.addEventListener('blur',()=>{if(el.value==='')el.value='0';});});function setMode(ch,m,btn){if(ch==='A')modeA=m;else modeB=m;btn.parentElement.querySelectorAll('.btn').forEach(b=>b.classList.remove('sel'));btn.classList.add('sel');}function collect(){return{a_hp:+document.getElementById('a_hp').value,a_lp:+document.getElementById('a_lp').value,a_dly:+document.getElementById('a_dly').value,b_hp:+document.getElementById('b_hp').value,b_lp:+document.getElementById('b_lp').value,b_dly:+document.getElementById('b_dly').value,eq:[+document.getElementById('eq0').value,+document.getElementById('eq1').value,+document.getElementById('eq2').value,+document.getElementById('eq3').value,+document.getElementById('eq4').value],modeA,modeB,user:selUser};}async function applyCrossover(){let d=collect();let r=await fetch('/api/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});document.getElementById('msg').textContent=await r.text();}async function doSave(){let d=collect();let r=await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});document.getElementById('msg').textContent=await r.text();}async function doDefault(){let r=await fetch('/api/default',{method:'POST'});document.getElementById('msg').textContent=await r.text();location.reload();}async function loadUser(n,btn){selUser=n;document.querySelectorAll('.grid .btn').forEach(b=>b.classList.remove('sel'));btn.classList.add('sel');let r=await fetch('/api/load?user='+n);let j=await r.json();document.getElementById('a_hp').value=j.a_hp;document.getElementById('a_lp').value=j.a_lp;document.getElementById('b_hp').value=j.b_hp;document.getElementById('b_lp').value=j.b_lp;document.getElementById('eq0').value=j.eq[0];document.getElementById('eq1').value=j.eq[1];document.getElementById('eq2').value=j.eq[2];document.getElementById('eq3').value=j.eq[3];document.getElementById('eq4').value=j.eq[4];}</script></body></html>
 )HTML";
 float getVal(String &body,const char* key){int idx=body.indexOf(key);if(idx<0)return 0;int c=body.indexOf(':',idx);return body.substring(c+1).toFloat();}
 void parseBody(String body){
@@ -131,23 +107,33 @@ server.on("/api/apply",HTTP_POST,[](){String b=server.arg("plain");parseBody(b);
 server.on("/api/save",HTTP_POST,[](){String b=server.arg("plain");parseBody(b);saveUserPreset(selectedUser);saveSettings();server.send(200,"text/plain",String("Saved to USER ")+selectedUser);});
 server.on("/api/default",HTTP_POST,[](){current=defaultPreset;applyAll();saveUserPreset(selectedUser);saveSettings();server.send(200,"text/plain","Reset to DEFAULT Flat");});
 server.on("/api/load",HTTP_GET,[](){int u=server.arg("user").toInt();if(u<1||u>4)u=1;loadUserPreset(u);String j=String("{\"a_hp\":")+current.chA_hp+",\"a_lp\":"+current.chA_lp+",\"b_hp\":"+current.chB_hp+",\"b_lp\":"+current.chB_lp+",\"eq\":["+current.webEQ[0]+","+current.webEQ[1]+","+current.webEQ[2]+","+current.webEQ[3]+","+current.webEQ[4]+"]}";server.send(200,"application/json",j);});
-server.begin();Serial.println("Web: http://192.168.4.1/ SSID DSP-TUNER");}
+server.begin();}
 void setupI2S(){
-auto configIn=i2sStreamIn.defaultConfig(RX_MODE);configIn.copyFrom(info);configIn.rx_tx_mode=RX_MODE;configIn.port_no=0;configIn.pin_bck=I2S_IN_BCK;configIn.pin_ws=I2S_IN_LRCK;configIn.pin_data=I2S_IN_DATA;configIn.is_master=false;configIn.buffer_count=16;configIn.buffer_size=512;i2sStreamIn.begin(configIn);bufferedIn.begin();
-auto configOut=i2sStreamOut.defaultConfig(TX_MODE);configOut.copyFrom(info);configOut.rx_tx_mode=TX_MODE;configOut.port_no=1;configOut.pin_bck=I2S_BCK_PIN;configOut.pin_ws=I2S_LRCK_PIN;configOut.pin_data=I2S_DATA1_PIN;configOut.buffer_count=12;configOut.buffer_size=512;i2sStreamOut.begin(configOut);
-auto vconfig=volumeControl.defaultConfig();vconfig.copyFrom(info);
-auto econfig=eqStream.defaultConfig();econfig.copyFrom(info);eqStream.begin(econfig);eqStream.addEffect(dspEffect);
-volumeControl.begin(vconfig);volumeControl.setVolume(targetMuted?0:targetVolume);copier.begin(i2sStreamOut,volumeControl);}
-void flushTank(){uint8_t tmp[512];while(bufferedIn.available()>0){int n=bufferedIn.readBytes(tmp,sizeof(tmp));if(n<=0)break;}Serial.println("Flush Tank");}
+auto configIn=i2sStreamIn.defaultConfig(RX_MODE);configIn.copyFrom(info);configIn.rx_tx_mode=RX_MODE;configIn.port_no=0;configIn.pin_bck=I2S_IN_BCK;configIn.pin_ws=I2S_IN_LRCK;configIn.pin_data=I2S_IN_DATA;configIn.is_master=false;configIn.buffer_count=16;configIn.buffer_size=512;i2sStreamIn.begin(configIn);
+auto configOut=i2sStreamOut.defaultConfig(TX_MODE);configOut.copyFrom(info);configOut.rx_tx_mode=TX_MODE;configOut.port_no=1;configOut.pin_bck=I2S_BCK_PIN;configOut.pin_ws=I2S_LRCK_PIN;configOut.pin_data=I2S_DATA1_PIN;configOut.buffer_count=12;configOut.buffer_size=512;i2sStreamOut.begin(configOut);}
+void flushTank(){uint8_t tmp[512];while(i2sStreamIn.available()>0){int n=i2sStreamIn.readBytes(tmp,sizeof(tmp));if(n<=0)break;}}
+void processAudio(){
+uint8_t buf[1024];int n=i2sStreamIn.available();if(n<=0)return;if(n>1024)n=1024;n=n/4*4;int read=i2sStreamIn.readBytes(buf,n);if(read<=0)return;
+int16_t* s=(int16_t*)buf;int frames=read/4;
+for(int i=0;i<frames;i++){
+float l=(float)s[i*2];float r=(float)s[i*2+1];
+for(int e=0;e<3;e++)remoteEQ[e].process(l,r);
+for(int e=0;e<5;e++)webEQ[e].process(l,r);
+chB_HP1.process(l,r);chB_LP1.process(l,r);
+if(current.chB_slope>=24){chB_HP2.process(l,r);chB_LP2.process(l,r);}
+float vol=targetMuted?0:fadeVolume;
+l*=vol;r*=vol;
+if(l>32767)l=32767;if(l<-32768)l=-32768;if(r>32767)r=32767;if(r<-32768)r=-32768;
+s[i*2]=(int16_t)l;s[i*2+1]=(int16_t)r;}
+i2sStreamOut.write(buf,read);}
 void setup(){Serial.begin(115200);delay(1000);setDefaultPreset();loadSettings();setupI2S();updateAllCoeffs();initWifiAndEspNow();setupWeb();lastAudioTime=millis();Serial.println("S3 DSP Ready");}
 void loop(){
-server.handleClient();int avail=bufferedIn.available();unsigned long now=millis();
-if(avail>200){lastAudioTime=now;if(gapMuted){gapMuted=false;isFadingUp=true;fadeStartTime=now;fadeVolume=0;volumeControl.setVolume(0);}}
-if(!gapMuted&&(now-lastAudioTime>100)){volumeControl.setVolume(0);delay(10);flushTank();gapMuted=true;isFadingUp=false;}
-if(isFadingUp){unsigned long el=now-fadeStartTime;if(el>=30){fadeVolume=targetMuted?0:targetVolume;volumeControl.setVolume(fadeVolume);isFadingUp=false;}else{float p=(float)el/30.0f;fadeVolume=(targetMuted?0:targetVolume)*p;volumeControl.setVolume(fadeVolume);}}
-if(!gapMuted)copier.copy();else delay(1);
-static int asrcCount=0;static int curRate=44100;if(++asrcCount>100){asrcCount=0;int av=bufferedIn.available();int tr=44100;if(av>12000)tr=44120;else if(av<4000)tr=44080;if(tr!=curRate){curRate=tr;i2s_set_sample_rates((i2s_port_t)1,tr);}}
-if(volDirty){volDirty=false;if(!gapMuted&&!isFadingUp)volumeControl.setVolume(targetMuted?0:targetVolume);}
+server.handleClient();int avail=i2sStreamIn.available();unsigned long now=millis();
+if(avail>200){lastAudioTime=now;if(gapMuted){gapMuted=false;isFadingUp=true;fadeStartTime=now;fadeVolume=0;}}
+if(!gapMuted&&(now-lastAudioTime>100)){delay(10);flushTank();gapMuted=true;isFadingUp=false;}
+if(isFadingUp){unsigned long el=now-fadeStartTime;if(el>=30){fadeVolume=targetMuted?0:targetVolume;isFadingUp=false;}else{float p=(float)el/30.0f;fadeVolume=(targetMuted?0:targetVolume)*p;}}
+if(!gapMuted)processAudio();else delay(1);
+if(volDirty){volDirty=false;}
 bool needUpdate=false;
 if(fabsf(targetBass-curBass)>0.01){curBass+=(targetBass>curBass?0.05f:-0.05f);needUpdate=true;}
 if(fabsf(targetMid-curMid)>0.01){curMid+=(targetMid>curMid?0.05f:-0.05f);needUpdate=true;}
