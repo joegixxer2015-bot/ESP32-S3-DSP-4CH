@@ -1,5 +1,4 @@
 #include <Arduino.h>
-#include <【entity-Arduino¦canonical_name=Arduino】.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <esp_now.h>
